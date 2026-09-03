@@ -1,0 +1,433 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Real-Time Price Pipeline: Microservice Architecture (Multi-Provider)</title>
+<style>
+  :root{
+    --bg:#f7f8fb; --card:#ffffff; --ink:#1a2233; --muted:#5b6579;
+    --line:#e2e6ee; --accent:#3b6fa0; --accent-bg:#eef4fc;
+    --warn:#d98c2b; --warn-bg:#fff8ec; --code-bg:#f1f3f8;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+    line-height:1.6;
+  }
+  .wrap{max-width:980px; margin:0 auto; padding:40px 24px 80px;}
+  h1{font-size:1.65rem; margin:0 0 4px; letter-spacing:-0.01em;}
+  .subtitle{color:var(--muted); margin:0 0 32px; font-size:1rem;}
+  h2{
+    font-size:1.18rem; margin:40px 0 14px; padding-bottom:8px;
+    border-bottom:1px solid var(--line);
+  }
+  h2:first-of-type{margin-top:0;}
+  h3{font-size:1rem; margin:22px 0 10px;}
+  p{margin:0 0 14px;}
+  ul,ol{margin:0 0 14px; padding-left:22px;}
+  li{margin-bottom:6px;}
+  strong{color:var(--ink);}
+  code{
+    font-family:"SFMono-Regular",Menlo,Consolas,monospace;
+    background:var(--code-bg); padding:0.15em 0.4em; border-radius:4px;
+    font-size:0.85em;
+  }
+  pre{
+    background:var(--code-bg); border:1px solid var(--line); border-radius:8px;
+    padding:16px; overflow-x:auto; font-size:0.76rem;
+    font-family:"SFMono-Regular",Menlo,Consolas,monospace;
+  }
+  table{
+    width:100%; border-collapse:collapse; margin:0 0 18px;
+    font-size:0.83rem; background:var(--card);
+    border:1px solid var(--line); border-radius:8px; overflow:hidden;
+  }
+  th,td{ text-align:left; padding:9px 11px; border-bottom:1px solid var(--line); vertical-align:top;}
+  th{background:var(--accent-bg); color:var(--accent); font-weight:600; font-size:0.74rem; text-transform:uppercase; letter-spacing:0.03em;}
+  tr:last-child td{border-bottom:none;}
+  .table-scroll{overflow-x:auto; margin:0 0 18px;}
+  .table-scroll table{margin:0;}
+  .callout{
+    background:var(--accent-bg); border:1px solid #cfe0f3; border-radius:8px;
+    padding:12px 15px; margin:0 0 10px; font-size:0.92rem;
+  }
+  .callout.strong{background:var(--warn-bg); border-color:#f0d4a8;}
+  .callout.muted{background:#f2f3f5; border-color:#dde0e6; color:var(--muted);}
+  .diagram-card{
+    background:var(--card); border:1px solid var(--line); border-radius:12px;
+    padding:16px; margin:0 0 12px;
+  }
+  svg{width:100%; height:auto; display:block;}
+  .legend{
+    display:flex; gap:16px; flex-wrap:wrap; font-size:0.78rem; color:var(--muted);
+    margin:10px 0 0; justify-content:center;
+  }
+  .legend span{display:inline-flex; align-items:center; gap:6px;}
+  .swatch{width:12px; height:12px; border-radius:3px; display:inline-block;}
+  .line-sample{width:22px; height:0; border-top:2px solid #4a5568; display:inline-block;}
+  .line-sample.dashed{border-top-style:dashed; border-color:#7c5cbf;}
+  footer{margin-top:48px; padding-top:16px; border-top:1px solid var(--line); color:var(--muted); font-size:0.82rem;}
+  ol.decisions li{margin-bottom:8px;}
+  a{color:var(--accent);}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>Real-Time Price Pipeline: Microservice Architecture (Multi-Provider)</h1>
+  <p class="subtitle">Redis Streams bus · PostgreSQL/TimescaleDB storage · Phase 1: synthetic provider only (Python) · Dukascopy (Java/JForex) deferred to Phase 2</p>
+
+  <h2>Objective (as given)</h2>
+  <ul>
+    <li>Consume tick price from a price provider — from multiple price providers concurrently</li>
+    <li>Stream raw ticks as-is for external consumers</li>
+    <li>Store raw ticks in a database</li>
+    <li>Build price aggregations in real time (1s, 1m, 5m, 15m, 30m, 1h, 4h, 1D) — <strong>live intrabar updates, not just bar-close events</strong></li>
+    <li>Make aggregations available to external consumers</li>
+    <li>Store aggregations for historical data</li>
+    <li>Low latency: &lt;10ms for aggregated price</li>
+    <li>Short-term resiliency</li>
+    <li>Modeled as an independently-deployable microservice architecture</li>
+    <li>Every tick and bar tagged with the provider it came from</li>
+  </ul>
+
+  <h2>Decisions (resolved)</h2>
+  <ol class="decisions">
+    <li><strong>Providers, phased.</strong> <code>synthetic</code> (configurable-rate Python tick generator) is the only <strong>active</strong> provider — build and run the whole pipeline against it now. <code>dukascopy</code> (real market data) is <strong>deferred to Phase 2</strong>: Dukascopy's JForex-API is officially Java-only (no Python bindings), and the only officially-supported language-agnostic path — Dukascopy's FIX 4.4 API — requires a $100,000 minimum deposit or institutional approval, not available now. See the research note below.</li>
+    <li><strong>Symbol set</strong>: 6 majors — EURUSD, GBPUSD, AUDUSD, USDCAD, USDJPY, USDCHF — for whichever provider is active.</li>
+    <li><strong>No cross-provider consolidated view.</strong> Confirmed — per-provider tagging only, no blending, even once a second provider is active.</li>
+    <li><strong>External consumers</strong>: same LAN, separate host from the pipeline itself.</li>
+    <li><strong>Aggregated-price SLA = live intrabar updates.</strong> Every tick updates the currently-forming bar's O/H/L/C, not just the bar-close event.</li>
+    <li><strong>Deployment</strong>: Docker Compose now, Kubernetes via minikube as the next target.</li>
+    <li><strong>Phase 1 scope</strong>: the architecture stays multi-provider-ready end-to-end (tagging, dynamic stream discovery, per-(provider,symbol) keys), but only <code>synthetic</code> is built and deployed today. Adding <code>dukascopy</code> later is a new <code>feed-adapter-dukascopy</code> deployment — no redesign of <code>aggregation-svc</code> or anything downstream.</li>
+    <li><strong>Synthetic generator fidelity</strong>: the generator must approximate Dukascopy's real tick-rate and statistical properties, not just a naive random walk — it's the sole active data source for an extended period, and Phase 1 results need to be meaningfully comparable once Phase 2 (real data) arrives.</li>
+    <li><strong>LAN gateway auth</strong>: LAN-only network trust is sufficient for this stage — no authentication/access-control layer required yet. Revisit if the trust boundary changes.</li>
+    <li><strong>aggregation-svc scaling</strong>: confirmed — starts as a single shared instance across the active provider(s) and all 6 symbols.</li>
+    <li><strong>Dukascopy (Phase 2) approach</strong>: will be implemented as a Java component exposing prices over a <strong>WebSocket</strong> interface, built later. Implementation detail deferred until Phase 2 starts: whether a thin bridge republishes the WebSocket feed into Redis (preserving the existing <code>ticks.raw.dukascopy.{symbol}</code> contract) or downstream services consume the WebSocket directly.</li>
+  </ol>
+
+  <h3>Research note: Dukascopy API access options</h3>
+  <p style="font-size:0.9rem;color:var(--muted);">Checked directly against Dukascopy's own documentation (2026-09-01), since this determines what's actually buildable, not just preferable.</p>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Option</th><th>Language</th><th>Cost / eligibility</th><th>Capability</th></tr></thead>
+    <tbody>
+      <tr><td><strong>JForex-API</strong></td><td><strong>Java only</strong> — no official Python bindings</td><td>No minimum deposit stated</td><td>Live/historical data + order execution, hosted strategy or standalone Java app</td></tr>
+      <tr><td><strong>FIX 4.4 API</strong></td><td>Language-agnostic (any FIX engine, e.g. QuickFIX)</td><td><strong>$100,000 minimum deposit</strong>, or institutional partner approval</td><td>Real-time streaming prices, order submission/mgmt, FX only</td></tr>
+      <tr><td>REST / WebSocket</td><td>—</td><td>—</td><td><strong>Not offered.</strong> No official first-party API; community tools (dukascopy-node, pyforex/Jython) are unofficial</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h2>Scope and assumptions</h2>
+  <div class="callout"><strong>10ms budget = internal processing latency</strong> (tick received → aggregate published on the bus), not wall-clock to a remote consumer.</div>
+  <div class="callout strong"><strong>Feed ingestion and aggregation stay separate services</strong> — split for two independent reasons: provider/language isolation (Dukascopy will very likely be Java when built), and one shared, provider-agnostic aggregation implementation. The latency cost is small relative to budget, so this holds even in Phase 1 with a single Python-only provider — it avoids a second re-architecture later.</div>
+  <div class="callout muted"><strong>Phase 1 = synthetic only.</strong> Real Dukascopy ingestion is deferred pending the Java/JForex build (or a change in FIX API eligibility). The pipeline is designed, built, and run end-to-end against <code>synthetic</code> data until then.</div>
+  <div class="callout"><strong>"Short-term resiliency"</strong> = recover from crashes/disconnects in seconds to at most a few hours.</div>
+  <div class="callout"><strong>Streaming bus: Redis Streams. Storage: PostgreSQL + TimescaleDB.</strong></div>
+
+  <h2>Service catalog</h2>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Service</th><th>Responsibility</th><th>Data owned</th><th>Publishes</th><th>Consumes</th><th>Scaling</th></tr></thead>
+    <tbody>
+      <tr><td><strong>feed-adapter-synthetic</strong></td><td>Generate configurable-rate synthetic ticks; tag <code>provider="synthetic"</code></td><td>None</td><td><code>ticks.raw.synthetic.{symbol}</code></td><td>Internal generator</td><td>One instance</td></tr>
+      <tr><td><strong>feed-adapter-dukascopy</strong> <em>(Phase 2 — planned, not built)</em></td><td>Connect to Dukascopy (JForex, Java); tag <code>provider="dukascopy"</code>; publish raw ticks only</td><td>None</td><td><code>ticks.raw.dukascopy.{symbol}</code></td><td>Dukascopy feed (external)</td><td>One instance</td></tr>
+      <tr><td><strong>aggregation-svc</strong></td><td>Discover &amp; consume raw ticks across all <em>active</em> providers; maintain live bar state per (provider,symbol,tf); checkpoint</td><td>None persistent</td><td><code>bars.{tf}.{provider}.{symbol}</code>; checkpoint key</td><td><code>ticks.raw.*</code> (active providers)</td><td>Single shared instance to start; shardable later</td></tr>
+      <tr><td><strong>tick-persistence-svc</strong></td><td>Discover &amp; consume raw ticks across all providers, batch-write durably</td><td><code>ticks</code> table (sole writer)</td><td>—</td><td><code>ticks.raw.*</code></td><td>Horizontal via consumer groups</td></tr>
+      <tr><td><strong>bar-persistence-svc</strong></td><td>Discover &amp; consume closed bars across all providers, batch-write durably</td><td><code>bars</code> table (sole writer)</td><td>—</td><td><code>bars.*.*</code>, closed only</td><td>Horizontal via consumer groups</td></tr>
+      <tr><td><strong>streaming-gateway-svc</strong></td><td>Relay live ticks/bars to LAN consumers over WebSocket, filterable by provider</td><td>None</td><td>WS API</td><td>Redis streams (all providers)</td><td>Horizontal; sticky routing beyond 1 instance (not yet)</td></tr>
+      <tr><td><strong>historical-query-svc</strong></td><td>Stateless REST for historical queries/backfill, filterable by provider</td><td>None (reads ticks/bars)</td><td>REST API</td><td>PostgreSQL (read-only)</td><td>Horizontal, stateless</td></tr>
+      <tr><td><strong>edge-gateway</strong> <em>(optional)</em></td><td>Single LAN-facing entrypoint: TLS/auth, routing, rate limiting</td><td>None</td><td>HTTPS / WSS</td><td>streaming-gateway-svc, historical-query-svc</td><td>Horizontal, stateless</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p style="font-size:0.85rem;color:var(--muted);">Platform components: Redis (bus + checkpoint store), PostgreSQL + TimescaleDB (system of record).</p>
+
+  <h2>Service topology</h2>
+  <div class="diagram-card">
+    <svg viewBox="0 0 1180 1070" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Microservice topology: a Synthetic Generator feeds feed-adapter-synthetic, the only active feed-adapter, which publishes raw ticks to Redis. Dukascopy and feed-adapter-dukascopy are shown as planned but not yet built, deferred to Phase 2 pending a Java/JForex integration. A shared aggregation-svc reads active provider tick streams from Redis and writes bar updates back to Redis. Redis fans out to tick-persistence-svc, bar-persistence-svc, and streaming-gateway-svc. The two persistence services write to PostgreSQL, which historical-query-svc reads from. historical-query-svc and streaming-gateway-svc both feed an optional edge-gateway serving LAN-based external consumers.">
+      <defs>
+        <marker id="arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/>
+        </marker>
+        <marker id="arrowMuted" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#7c5cbf"/>
+        </marker>
+        <marker id="arrowPlanned" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#9aa1ac"/>
+        </marker>
+      </defs>
+
+      <!-- Sources -->
+      <rect x="140" y="20" width="350" height="56" rx="8" fill="#f4f5f7" stroke="#9aa1ac" stroke-width="1.5" stroke-dasharray="2 3"/>
+      <text x="315" y="42" text-anchor="middle" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="13.5" font-weight="700" fill="#5b6579">Dukascopy</text>
+      <text x="315" y="59" text-anchor="middle" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#8a8f99">(Phase 2 — not yet integrated)</text>
+
+      <rect x="690" y="20" width="350" height="56" rx="8" fill="#eef0f5" stroke="#6b7280" stroke-width="1.5"/>
+      <text x="865" y="42" text-anchor="middle" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="13.5" font-weight="700" fill="#1a2233">Synthetic Generator</text>
+      <text x="865" y="59" text-anchor="middle" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="10.5" fill="#5b6579">(internal, ACTIVE — Phase 1 source)</text>
+
+      <line x1="315" y1="76" x2="315" y2="108" stroke="#9aa1ac" stroke-width="1.5" stroke-dasharray="2 3" marker-end="url(#arrowPlanned)"/>
+      <line x1="865" y1="76" x2="865" y2="108" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+      <!-- feed-adapter-dukascopy (planned) -->
+      <rect x="140" y="110" width="350" height="130" rx="10" fill="#f4f5f7" stroke="#9aa1ac" stroke-width="1.75" stroke-dasharray="2 3"/>
+      <text x="315" y="134" text-anchor="middle" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="12.5" font-weight="700" fill="#5b6579">feed-adapter-dukascopy</text>
+      <text x="315" y="151" text-anchor="middle" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="9.5" font-weight="700" fill="#8a8f99">[Java] · PLANNED — NOT BUILT (Phase 2)</text>
+      <text x="160" y="175" font-family="SFMono-Regular,Menlo,Consolas,monospace" font-size="9.5" fill="#8a8f99">1. connect (Dukascopy JForex API)</text>
+      <text x="160" y="193" font-family="SFMono-Regular,Menlo,Consolas,monospace" font-size="9.5" fill="#8a8f99">2. normalize + tag provider=dukascopy</text>
+      <text x="160" y="211" font-family="SFMono-Regular,Menlo,Consolas,monospace" font-size="9.5" fill="#8a8f99">3. XADD ticks.raw.dukascopy.{symbol}</text>
+
+      <!-- feed-adapter-synthetic (active) -->
+      <rect x="690" y="110" width="350" height="130" rx="10" fill="#fff8ec" stroke="#d98c2b" stroke-width="1.75" stroke-dasharray="7 4"/>
+      <text x="865" y="134" text-anchor="middle" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="12.5" font-weight="700" fill="#1a2233">feed-adapter-synthetic</text>
+      <text x="865" y="151" text-anchor="middle" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="9.5" font-weight="700" fill="#b8730f">[Python] · provider="synthetic" · ACTIVE critical path</text>
+      <text x="710" y="175" font-family="SFMono-Regular,Menlo,Consolas,monospace" font-size="9.5" fill="#1a2233">1. generate tick (configurable rate)</text>
+      <text x="710" y="193" font-family="SFMono-Regular,Menlo,Consolas,monospace" font-size="9.5" fill="#1a2233">2. tag provider=synthetic</text>
+      <text x="710" y="211" font-family="SFMono-Regular,Menlo,Consolas,monospace" font-size="9.5" fill="#1a2233">3. XADD ticks.raw.synthetic.{symbol}</text>
+
+      <!-- converge into Redis -->
+      <path d="M315,240 L315,260 L340,260 L340,280" fill="none" stroke="#9aa1ac" stroke-width="1.5" stroke-dasharray="2 3" marker-end="url(#arrowPlanned)"/>
+      <text x="345" y="258" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="8" fill="#9aa1ac">(planned)</text>
+      <path d="M865,240 L865,255 L560,255 L560,280" fill="none" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+      <!-- Redis -->
+      <rect x="250" y="280" width="340" height="140" rx="8" fill="#f5f0fc" stroke="#7c5cbf" stroke-width="1.5"/>
+      <text x="420" y="304" text-anchor="middle" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="13.5" font-weight="700" fill="#1a2233">Redis</text>
+      <text x="420" y="321" text-anchor="middle" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="9" fill="#7c5cbf" font-weight="700">PLATFORM — bus + checkpoint store</text>
+      <text x="420" y="338" text-anchor="middle" font-family="SFMono-Regular,Menlo,Consolas,monospace" font-size="8.5" fill="#5b6579">ticks.raw.{provider}.{symbol}</text>
+      <text x="420" y="353" text-anchor="middle" font-family="SFMono-Regular,Menlo,Consolas,monospace" font-size="8.5" fill="#5b6579">bars.{tf}.{provider}.{symbol}</text>
+      <text x="420" y="368" text-anchor="middle" font-family="SFMono-Regular,Menlo,Consolas,monospace" font-size="8.5" fill="#5b6579">bar_state:{provider}:{symbol}</text>
+      <text x="420" y="385" text-anchor="middle" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="8.5" fill="#5b6579">AOF everysec · MAXLEN sized to retention</text>
+
+      <!-- aggregation-svc -->
+      <rect x="650" y="280" width="340" height="140" rx="10" fill="#fff8ec" stroke="#d98c2b" stroke-width="1.75" stroke-dasharray="7 4"/>
+      <text x="820" y="304" text-anchor="middle" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="12.5" font-weight="700" fill="#1a2233">aggregation-svc</text>
+      <text x="820" y="321" text-anchor="middle" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="9" fill="#5b6579">shared — consumes ALL active provider streams</text>
+      <text x="668" y="339" font-family="SFMono-Regular,Menlo,Consolas,monospace" font-size="8.5" fill="#1a2233">1. XREADGROUP ticks.raw.* (discovery)</text>
+      <text x="668" y="355" font-family="SFMono-Regular,Menlo,Consolas,monospace" font-size="8.5" fill="#1a2233">2. update bar state (provider,symbol,tf)</text>
+      <text x="686" y="369" font-family="SFMono-Regular,Menlo,Consolas,monospace" font-size="8.5" fill="#5b6579">— 1s..1D, all timeframes in parallel</text>
+      <text x="668" y="387" font-family="SFMono-Regular,Menlo,Consolas,monospace" font-size="8.5" fill="#1a2233">3. XADD bars.{tf}.{provider}.{symbol}</text>
+      <text x="820" y="405" text-anchor="middle" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="9" font-weight="700" fill="#b8730f">~1–3ms typical (2-hop critical path)</text>
+
+      <!-- Redis <-> aggregation-svc -->
+      <line x1="590" y1="330" x2="646" y2="330" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arrow)"/>
+      <text x="595" y="326" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="8" fill="#5b6579">XREAD</text>
+      <line x1="646" y1="372" x2="590" y2="372" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arrow)"/>
+      <text x="595" y="386" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="8" fill="#5b6579">XADD bars</text>
+
+      <!-- Redis branch down to 3 consumers -->
+      <path d="M420,420 L420,440 L250,440 L250,468" fill="none" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arrow)"/>
+      <path d="M420,420 L420,440 L590,440 L590,468" fill="none" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arrow)"/>
+      <path d="M420,420 L420,440 L950,440 L950,468" fill="none" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+      <!-- tick-persistence-svc -->
+      <rect x="100" y="468" width="300" height="90" rx="8" fill="#eef4fc" stroke="#3b6fa0" stroke-width="1.5"/>
+      <text x="250" y="492" text-anchor="middle" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="12" font-weight="700" fill="#1a2233">tick-persistence-svc</text>
+      <text x="250" y="510" text-anchor="middle" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="9.5" fill="#5b6579">discovers ticks.raw.* per provider</text>
+      <text x="250" y="526" text-anchor="middle" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="9.5" fill="#5b6579">owns: ticks (provider-tagged)</text>
+
+      <!-- bar-persistence-svc -->
+      <rect x="440" y="468" width="300" height="90" rx="8" fill="#eef4fc" stroke="#3b6fa0" stroke-width="1.5"/>
+      <text x="590" y="492" text-anchor="middle" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="12" font-weight="700" fill="#1a2233">bar-persistence-svc</text>
+      <text x="590" y="510" text-anchor="middle" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="9.5" fill="#5b6579">discovers bars.*.* per provider (closed)</text>
+      <text x="590" y="526" text-anchor="middle" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="9.5" fill="#5b6579">owns: bars (provider-tagged)</text>
+
+      <!-- streaming-gateway-svc -->
+      <rect x="800" y="468" width="300" height="90" rx="8" fill="#eef4fc" stroke="#3b6fa0" stroke-width="1.5"/>
+      <text x="950" y="492" text-anchor="middle" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="12" font-weight="700" fill="#1a2233">streaming-gateway-svc</text>
+      <text x="950" y="510" text-anchor="middle" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="9.5" fill="#5b6579">WS relay → LAN consumers</text>
+      <text x="950" y="526" text-anchor="middle" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="9.5" fill="#5b6579">slow-consumer: drop-oldest</text>
+
+      <line x1="250" y1="558" x2="250" y2="618" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arrow)"/>
+      <line x1="590" y1="558" x2="590" y2="618" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+      <!-- long line from streaming-gateway-svc to edge-gateway -->
+      <path d="M950,558 L950,873 L720,873 L720,888" fill="none" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+      <!-- Postgres -->
+      <rect x="100" y="618" width="640" height="100" rx="8" fill="#f5f0fc" stroke="#7c5cbf" stroke-width="1.5"/>
+      <text x="420" y="642" text-anchor="middle" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="14" font-weight="700" fill="#1a2233">PostgreSQL + TimescaleDB</text>
+      <text x="420" y="659" text-anchor="middle" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="9.5" fill="#7c5cbf" font-weight="700">PLATFORM — system of record</text>
+      <text x="420" y="676" text-anchor="middle" font-family="SFMono-Regular,Menlo,Consolas,monospace" font-size="9" fill="#5b6579">ticks(provider,symbol,ts) — owner: tick-persistence-svc</text>
+      <text x="420" y="692" text-anchor="middle" font-family="SFMono-Regular,Menlo,Consolas,monospace" font-size="9" fill="#5b6579">bars(provider,symbol,tf,ts) — owner: bar-persistence-svc</text>
+
+      <line x1="420" y1="718" x2="420" y2="756" stroke="#7c5cbf" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#arrowMuted)"/>
+      <text x="435" y="734" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="9" fill="#7c5cbf">read-only,</text>
+      <text x="435" y="745" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="9" fill="#7c5cbf">cross-service</text>
+
+      <!-- historical-query-svc -->
+      <rect x="250" y="758" width="340" height="90" rx="8" fill="#eef4fc" stroke="#3b6fa0" stroke-width="1.5"/>
+      <text x="420" y="782" text-anchor="middle" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="12" font-weight="700" fill="#1a2233">historical-query-svc</text>
+      <text x="420" y="800" text-anchor="middle" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="9.5" fill="#5b6579">stateless REST — filter by provider</text>
+      <text x="420" y="816" text-anchor="middle" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="9.5" fill="#5b6579">reads ticks/bars (documented exception)</text>
+
+      <path d="M420,848 L420,873 L460,873 L460,888" fill="none" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+      <!-- edge-gateway -->
+      <rect x="340" y="888" width="500" height="70" rx="8" fill="#eafaf3" stroke="#2f9e6c" stroke-width="1.5" stroke-dasharray="5 3"/>
+      <text x="590" y="914" text-anchor="middle" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" font-weight="700" fill="#1a2233">edge-gateway (optional)</text>
+      <text x="590" y="932" text-anchor="middle" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="10" fill="#5b6579">TLS/auth · routing · rate limit</text>
+
+      <line x1="590" y1="958" x2="590" y2="976" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+      <!-- External Consumers -->
+      <rect x="390" y="978" width="400" height="70" rx="8" fill="#eef0f5" stroke="#6b7280" stroke-width="1.5"/>
+      <text x="590" y="1004" text-anchor="middle" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" font-weight="700" fill="#1a2233">External Consumers</text>
+      <text x="590" y="1022" text-anchor="middle" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="10" fill="#5b6579">same LAN, separate host</text>
+    </svg>
+    <div class="legend">
+      <span><span class="swatch" style="background:#fff8ec;border:1.5px dashed #d98c2b;"></span>critical path, ACTIVE (~1–3ms, 2-hop)</span>
+      <span><span class="swatch" style="background:#f4f5f7;border:1.5px dotted #9aa1ac;"></span>planned / deferred — Phase 2, not built</span>
+      <span><span class="swatch" style="background:#eef4fc;border:1.5px solid #3b6fa0;"></span>microservice</span>
+      <span><span class="swatch" style="background:#f5f0fc;border:1.5px solid #7c5cbf;"></span>platform / shared infra</span>
+      <span><span class="swatch" style="background:#eafaf3;border:1.5px dashed #2f9e6c;"></span>edge (optional)</span>
+      <span><span class="swatch" style="background:#eef0f5;border:1.5px solid #6b7280;"></span>external actor</span>
+      <span><span class="line-sample dashed"></span>off-path / documented exception</span>
+    </div>
+  </div>
+
+  <h2>Why feed-adapter and aggregation-svc stay split</h2>
+  <p>The previous version of this design combined feed handling and aggregation into one process to avoid a network hop on the &lt;10ms critical path — correct <em>given</em> both were in the same language/process. That assumption held for exactly as long as Dukascopy looked like it might be built in Python. It isn't: JForex-API is officially Java-only, with no free Python-compatible alternative (see research note above). So the split stays, for a forward-looking reason rather than a today reason.</p>
+  <p><strong>Today</strong>, with only <code>synthetic</code> (Python) active, a combined single-process design would technically be possible and would save the ~1–2ms of network-hop latency. <strong>But</strong> Dukascopy's eventual return is very likely a Java component again — nothing about deferring it changes that constraint. Keeping <code>feed-adapter-{provider}</code> and <code>aggregation-svc</code> separate now means:</p>
+  <ol>
+    <li>Adding <code>feed-adapter-dukascopy</code> later is purely additive — a new Java service that publishes to a Redis stream <code>aggregation-svc</code> already knows how to discover. No rework of aggregation logic, no re-architecture.</li>
+    <li>Aggregation logic exists in exactly one place, in one language, regardless of how many providers (or what languages their adapters use) exist.</li>
+    <li>The latency cost is small relative to budget either way — paying it now to avoid paying a redesign cost later is the better trade at this stage.</li>
+  </ol>
+  <p><strong>The honest trade-off, unchanged from before:</strong> <code>aggregation-svc</code> is a single point of failure for bar production across all active providers. Today that only means synthetic bars stop if it crashes (Dukascopy isn't active yet) — but the failure-isolation profile widens back out once a second provider is added. Starting as one shared instance is still the right call at this scale; shard later if monitoring says so.</p>
+
+  <h2>Data model</h2>
+  <pre>Tick:  { provider, symbol, provider_symbol?, provider_ts, recv_ts, bid, ask,
+         bid_size?, ask_size?, session_id, seq }
+Bar:   { provider, symbol, timeframe, bar_start_ts, open, high, low, close,
+         tick_count, is_closed, last_update_ts }</pre>
+  <p>Redis streams: <code>ticks.raw.{provider}.{symbol}</code>, <code>bars.{timeframe}.{provider}.{symbol}</code>. Postgres/TimescaleDB: <code>ticks</code> hypertable indexed on <code>(provider, symbol, ts)</code>; <code>bars</code> hypertable indexed on <code>(provider, symbol, timeframe, bar_start_ts)</code>.</p>
+  <p><code>seq</code> is <code>uint64</code>, monotonic and gapless <strong>per <code>(provider, symbol)</code></strong>, and <strong>resets to 0 on every feed-adapter (re)start</strong>. <code>session_id</code> identifies one adapter session for that stream, so consumers do gap detection on <code>(session_id, seq)</code> — a <code>seq</code> jump within a session is real tick loss; a <code>session_id</code> change is an expected restart, not loss. Dedup/reconciliation keys on <code>(provider, symbol, session_id, seq)</code>. See <em>Architecture-Open-Questions.md</em> §#4.</p>
+
+  <h2>Latency budget (internal, critical path — unchanged by provider count)</h2>
+  <table>
+    <thead><tr><th>Stage</th><th>Order of magnitude</th></tr></thead>
+    <tbody>
+      <tr><td>feed-adapter: parse/normalize/tag tick</td><td>~0.05–0.2 ms</td></tr>
+      <tr><td>feed-adapter: publish to Redis (XADD)</td><td>~0.1–0.5 ms</td></tr>
+      <tr><td>aggregation-svc: notice new entry (XREADGROUP, blocking)</td><td>~0.1–1 ms — least certain figure, benchmark once built</td></tr>
+      <tr><td>aggregation-svc: update bar state</td><td>~0.01–0.05 ms</td></tr>
+      <tr><td>aggregation-svc: publish bar update (XADD)</td><td>~0.1–0.5 ms</td></tr>
+      <tr><td><strong>Total</strong></td><td><strong>roughly 1–3 ms typical</strong> — comfortably under 10ms. Applies the same whether one provider or several are active.</td></tr>
+    </tbody>
+  </table>
+  <p>This budget covers tick-received → bar-published-to-Redis. Delivery from streaming-gateway-svc to a LAN consumer is a separate hop again.</p>
+
+  <h2>LAN consumer delivery</h2>
+  <p>External consumers are same-LAN, separate host — not localhost, not open internet. Two consequences: streaming-gateway-svc and historical-query-svc (or edge-gateway) need to bind to a LAN-reachable interface rather than <code>127.0.0.1</code>; and since the API is reachable by anything on the LAN rather than only local processes, basic access control (an API key or LAN-scoped auth) is worth having even though this isn't internet-facing — "same LAN" is not the same trust boundary as "same process." LAN round-trip latency is typically sub-millisecond to a few ms — small relative to the internal budget, but a genuinely separate number, not part of it.</p>
+
+  <h2>Redis memory sizing (concrete, Phase 1: 6 symbols × 1 active provider)</h2>
+  <p>6 (provider, symbol) combinations (<code>synthetic</code> only, for now). At a representative ~30 ticks/sec/pair × 6 ≈ 180 ticks/sec total, ~100–150 bytes/entry:</p>
+  <table>
+    <thead><tr><th>Retention window</th><th>Approx. memory</th></tr></thead>
+    <tbody>
+      <tr><td>4–6 hours</td><td>roughly 325–500MB</td></tr>
+      <tr><td>24 hours</td><td>roughly 2–2.5GB</td></tr>
+    </tbody>
+  </table>
+  <p style="font-size:0.85rem;color:var(--muted);">This roughly <strong>doubles</strong> once <code>dukascopy</code> is added as a second active provider (12 combinations: ~650MB–1GB for 4–6h, ~4–5GB for 24h) — worth budgeting Redis memory for that from the start. The synthetic provider's rate is fully controllable.</p>
+
+  <h2>Failure isolation (blast radius, Phase 1)</h2>
+  <table>
+    <thead><tr><th>Component down</th><th>Blast radius</th></tr></thead>
+    <tbody>
+      <tr><td>feed-adapter-synthetic</td><td>Only synthetic ticks stop — currently the <em>only</em> active feed, so this stops all live ingestion until it recovers. (Reverts to isolated-per-provider once dukascopy is added.)</td></tr>
+      <tr><td><strong>aggregation-svc</strong></td><td><strong>No new bars</strong> — raw tick capture/persistence continue independently, but bar production stops until recovery</td></tr>
+      <tr><td>streaming-gateway-svc</td><td>LAN consumers lose the live feed; ingestion, aggregation, persistence, DB unaffected</td></tr>
+      <tr><td>historical-query-svc</td><td>REST/backfill unavailable; live pipeline unaffected</td></tr>
+      <tr><td>tick-persistence-svc</td><td>Tick durability paused, buffered up to MAXLEN; live pipeline unaffected</td></tr>
+      <tr><td>bar-persistence-svc</td><td>Bar durability paused, same buffering; live pipeline unaffected</td></tr>
+      <tr><td>edge-gateway</td><td>LAN access blocked at the edge; internal pipeline keeps running</td></tr>
+      <tr><td>Redis</td><td>Everything stalls — shared platform dependency</td></tr>
+      <tr><td>Postgres</td><td>Writes buffer in Redis; historical-query-svc degrades; live pipeline unaffected</td></tr>
+      <tr><td>Prometheus / Grafana</td><td>No dashboards, metrics history, or alerts — flying blind until it's back, but the live pipeline is unaffected (metrics are pulled, not pushed, so a scraper outage can't block a service)</td></tr>
+    </tbody>
+  </table>
+  <p style="font-size:0.85rem;color:var(--muted);">Note the honest cost of Phase 1 being single-provider: <code>feed-adapter-synthetic</code> going down currently takes out <em>all</em> live data, not just one provider's slice — a natural, temporary consequence of there being only one active feed, not a design flaw.</p>
+
+  <h2>Observability</h2>
+  <h3>Design principle: instrument the critical path without joining it</h3>
+  <p>The &lt;10ms budget rules out anything that adds a network hop or blocking call inside the tick→bar path. That rules out synchronous distributed-tracing span export on every tick, and it rules out logging every tick at INFO. Instead: <code>recv_ts</code> is already carried in the Tick payload (data model above), so per-hop latency is computed locally — <code>now() - recv_ts</code> — and recorded into an <strong>in-process</strong> Prometheus histogram, an in-memory counter increment, not a network call. Prometheus then scrapes each service's <code>/metrics</code> endpoint on its own schedule, fully decoupled from the critical path. This replaces the "least certain figure — benchmark once built" caveats in the latency budget table above with real, continuous p50/p95/p99 numbers.</p>
+
+  <h3>Metrics (Prometheus, pull-based via <code>/metrics</code>)</h3>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Service</th><th>Key metrics</th></tr></thead>
+    <tbody>
+      <tr><td><strong>feed-adapter-{provider}</strong></td><td><code>ticks_published_total</code> (by provider/symbol); <code>publish_latency_ms</code> (histogram, recv_ts → XADD complete); <code>feed_connection_status</code> (gauge); <code>feed_reconnects_total</code></td></tr>
+      <tr><td><strong>aggregation-svc</strong></td><td><strong><code>tick_to_bar_latency_ms</code></strong> (histogram, now() − recv_ts at bar XADD — the direct &lt;10ms SLA measurement, by provider/symbol/timeframe); <code>ticks_consumed_total</code>; <code>consumer_lag</code>; <code>checkpoint_duration_ms</code>; <code>aggregation_errors_total</code></td></tr>
+      <tr><td><strong>tick/bar-persistence-svc</strong></td><td><code>batch_write_duration_ms</code>; <code>batch_size</code>; <code>write_errors_total</code>; <code>consumer_lag</code></td></tr>
+      <tr><td><strong>streaming-gateway-svc</strong></td><td><code>connected_clients</code>; <code>messages_relayed_total</code>; <code>slow_consumer_drops_total</code></td></tr>
+      <tr><td><strong>historical-query-svc</strong></td><td><code>request_duration_ms</code>; <code>request_errors_total</code></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p style="font-size:0.85rem;color:var(--muted);"><strong>Redis/Postgres internals</strong> (memory, stream lengths, table/hypertable sizes) are checked manually via <code>redis-cli</code> / <code>psql</code> for now rather than dashboarded — <code>redis_exporter</code>/<code>postgres_exporter</code> are purely additive later if that stops being enough.</p>
+  <p style="font-size:0.85rem;color:var(--muted);"><strong>Correlation</strong>: <code>(provider, symbol, session_id, seq)</code> — already in the Tick schema — is the correlation key across logs and metrics when tracing one specific bad event by hand, without needing a tracing backend.</p>
+
+  <h3>Logs (structured, not centralized)</h3>
+  <p>JSON-structured logs. INFO level for service lifecycle, connection state changes, checkpoint writes, and batch-persistence completions — not per-tick (that volume would itself become a latency/resource risk). Tick-level detail is available at DEBUG, off by default. No centralized log aggregation for now — logs go to stdout, captured automatically by Docker/Kubernetes, and read with <code>docker compose logs -f &lt;service&gt;</code> (or <code>kubectl logs</code> later). Add Loki only if this stops being enough — e.g. once searching across services or retaining logs longer than local rotation allows actually matters.</p>
+
+  <h3>Dashboards (Grafana)</h3>
+  <ol>
+    <li><strong>Critical path latency</strong> — <code>tick_to_bar_latency_ms</code> p50/p95/p99 per (provider, symbol, timeframe), with a reference line at the 10ms budget.</li>
+    <li><strong>Pipeline health</strong> — consumer lag across all Redis-consuming services, feed connection status per provider.</li>
+    <li><strong>Failure isolation view</strong> — per-service up/down, using Prometheus's own scrape-target <code>up</code> metric (no extra infrastructure needed) — mirrors the failure-isolation table above.</li>
+  </ol>
+
+  <h3>Alerting (Grafana's built-in alerting — no separate Alertmanager container)</h3>
+  <p>Grafana 8+ ships a built-in alerting engine that evaluates rules directly against its Prometheus datasource; a single-instance setup doesn't need a standalone Alertmanager to get real alerting. Rules fire and show in the Grafana UI regardless of whether a notification channel (email/webhook) is configured — enough to notice on your own check-ins; wiring a notification channel is a config change any time, not an architecture one.</p>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Condition</th><th>Severity</th><th>Rationale</th></tr></thead>
+    <tbody>
+      <tr><td><code>tick_to_bar_latency_ms</code> p99 &gt; 10ms, sustained &gt;1min</td><td>Warning</td><td>Direct SLA breach signal</td></tr>
+      <tr><td>Consumer lag growing unbounded on any stream</td><td>Critical</td><td>Indicates a consumer (often aggregation-svc, the documented SPOF) is falling behind or down</td></tr>
+      <tr><td><code>feed_connection_status == 0</code> for &gt;30s</td><td>Warning</td><td>Feed adapter disconnected from its provider</td></tr>
+      <tr><td>aggregation-svc <code>/health</code> failing or unscraped</td><td>Critical</td><td>Matches its documented single-point-of-failure status</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h3>Why not full distributed tracing (Jaeger/Tempo/OpenTelemetry spans)</h3>
+  <p>Worth addressing directly since it's the obvious alternative. The pipeline is shallow — 2–3 hops from tick to bar to persistence/gateway — so the diagnostic value distributed tracing adds (visualizing complex multi-hop call graphs) is low, while span creation and export, even batched, adds CPU and GC pressure directly in the hot path this design has otherwise kept clear of network calls. Embedding timestamps in the message payload and computing latency via local histograms gets most of the same diagnostic value — where time is being spent, per stage — without that cost. If the pipeline grows more hops or more complex fan-out later, OpenTelemetry can be layered in incrementally per-service without changing the data model, since <code>provider_ts</code>/<code>recv_ts</code> are already there to anchor spans to.</p>
+
+  <h3>Observability platform components</h3>
+  <p>Deliberately minimal — 2 containers, not 6. This is the low-complexity option: real dashboards and real alerting for the one metric that matters (<code>tick_to_bar_latency_ms</code>), without deploying anything the project doesn't yet need.</p>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Component</th><th>Role</th><th>Scaling</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Prometheus</strong></td><td>Scrapes /metrics from every service; stores time series</td><td>Single instance at this scale</td></tr>
+      <tr><td><strong>Grafana</strong></td><td>Dashboards over Prometheus, plus built-in alerting (no separate Alertmanager)</td><td>Single instance</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p style="font-size:0.85rem;color:var(--muted);"><strong>Deferred, purely additive later</strong>: <code>redis_exporter</code>/<code>postgres_exporter</code> (if Redis/Postgres internals need dashboarding), Loki + Promtail (if logs need centralizing/searching across services), Alertmanager (if alert routing outgrows Grafana's built-in engine). None require restructuring anything already built.</p>
+
+  <h2>Deployment model</h2>
+  <ul>
+    <li><strong>feed-adapter-synthetic</strong>: Python, own Dockerfile, configurable tick-rate and symbol set via env/config.</li>
+    <li><strong>aggregation-svc, tick-persistence-svc, bar-persistence-svc, streaming-gateway-svc, historical-query-svc</strong>: Python, own Dockerfile each, own 12-factor config, own <code>/health</code>, <code>/ready</code>, <code>/metrics</code>.</li>
+    <li><strong>feed-adapter-dukascopy (Phase 2, not built yet)</strong>: Java, own Dockerfile (JRE base image + built JAR), config (JForex credentials, symbol map) via secret/config. Needs its own build pipeline (Maven/Gradle) — set up as a distinct CI job only once Phase 2 starts.</li>
+    <li><strong>Now (single host)</strong>: Docker Compose — six Python services + redis + postgres (TimescaleDB image), optional edge-gateway, plus <code>prometheus</code> and <code>grafana</code>. No Java in Compose yet.</li>
+    <li><strong>Next: minikube (local Kubernetes)</strong>. Single-node, so most services run as 1-replica Deployments to start — a good exercise for real K8s manifests (Deployment + ClusterIP Service + ConfigMap/Secret per service) without yet needing multi-node concerns like streaming-gateway-svc sticky routing. Prometheus and Grafana map to their own lightweight Helm charts (<code>prometheus-community/prometheus</code>, <code>grafana/grafana</code>) rather than the full <code>kube-prometheus-stack</code> bundle, keeping only what's actually deployed.</li>
+    <li><strong>CI/CD</strong>: adding <code>dukascopy</code> later is a new feed-adapter deployment (plus its own Java build pipeline), not a change to <code>aggregation-svc</code> or anything downstream.</li>
+  </ul>
+
+  <h2>Open items</h2>
+  <div class="callout muted"><strong>Dukascopy WebSocket bridge design</strong> (Phase 2, non-blocking): whether the Java component's WebSocket feed is republished into Redis by a thin bridge (keeping today's <code>ticks.raw.dukascopy.{symbol}</code> contract intact) or consumed directly by downstream services — to be decided when Phase 2 work starts.</div>
+
+  <footer>Real-Time Price Pipeline — Microservice Architecture, Multi-Provider · Software Engineer for Algorithmic Trading project</footer>
+</div>
+</body>
+</html>

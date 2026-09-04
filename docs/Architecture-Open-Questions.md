@@ -21,7 +21,7 @@ At ~30 ticks/s/pair:
 ```
 
 For a 1D or 4h bar, ~29 of every 30 updates change nothing a consumer cares about (occasionally a
-new high/low). A LAN consumer subscribed to all TFs for 6 symbols takes ~1,440 bar msgs/sec, almost
+new high/low). A LAN consumer subscribed to all TFs for 13 symbols takes ~3,120 bar msgs/sec, almost
 all redundant long-TF churn.
 
 Questions:
@@ -65,8 +65,8 @@ O=H=L=C=last close, or a gap in the series?)
 
 Answer:
 
-**Execution model.** One actor per `(provider, symbol, timeframe)` — 48 actors for the synthetic
-provider (6 symbols x 8 timeframes), 96 once Dukascopy is added. Each actor owns exactly one forming
+**Execution model.** One actor per `(provider, symbol, timeframe)` — 104 actors for the synthetic
+provider (13 symbols x 8 timeframes), 208 once Dukascopy is added. Each actor owns exactly one forming
 bar, its own FIFO mailbox, and its own checkpoint. Cross-timeframe isolation: a heavy 4h/1D bar
 close never sits in front of a 1s tick for the same symbol.
 
@@ -146,7 +146,7 @@ the correct fix for the silent-gap problem.
 
 **Backstop A — hard cap + alert.** The janitor also enforces a ceiling:
 `trim_to = max(min_consumer_position, stream_length - N)`, with `N` sized to the resiliency target
-(a few hours of worst-case volume — ~500 MB/provider for ~6 h per the sizing table, comfortably
+(a few hours of worst-case volume — ~1.1 GB/provider for ~6 h per the sizing table, comfortably
 affordable). If a consumer lags past `N`, its unread entries *are* trimmed (that consumer takes a
 data gap) so Redis memory stays bounded, and a **Critical alert** fires. This keeps one wedged
 consumer from growing a stream until Redis OOMs and stalls the whole platform.
@@ -222,10 +222,48 @@ Open questions:
 Might deserve its own change proposal, separate from the pipeline.
 
 
-Answer. 
+Answer.
 
-I will provide, for each currency pair, a sample of one day of tick data so the properties can be derived
-from that data.
+Calibrate against a supplied historical tick sample, one file per currency pair.
+
+**Sample data — delivered, committed as Parquet.** `data/` holds one Parquet file per pair,
+covering 2026-08-31 (Mon) through 2026-09-04 (Fri, partial, to ~10:42 ART) — roughly four trading
+days plus the weekend gap. Originally delivered as Dukascopy-format CSV; converted to Parquet
+(snappy-compressed, ~5.4x smaller: ~301MB CSV -> ~55MB Parquet) so the sample lives in the repo
+without CSV bloat. Source CSVs are not retained.
+
+```
+data/{SYMBOL}_Ticks_2026.08.31_2026.09.04.parquet
+columns: time_art (timestamp[ms], local ART = UTC-3), Ask, Bid, AskVolume, BidVolume (all float64)
+```
+
+All 6 in-scope majors are present (EURUSD, GBPUSD, AUDUSD, USDCAD, USDJPY, USDCHF); the folder also
+carries 7 extra crosses (AUDJPY, EURGBP, EURJPY, GBPJPY, NZDJPY, NZDUSD, USDCNH) — usable but not
+required.
+
+This is the calibration set for the `add-synthetic-feed-fidelity` change.
+
+**Fidelity metrics (settled).**
+
+1. **Returns** — mid-price (`(Ask+Bid)/2`) log returns on a **1-minute grid**, per symbol per
+   session. Targets: **mean** and **standard deviation** of the return distribution. The synthetic
+   generator must reproduce both.
+2. **Tick volume over time** — **tick count per UTC hour-of-day**, per symbol. Hourly buckets
+   replace strict session partitioning as the measured granularity (sidesteps the overlapping
+   session-window problem); the four sessions below are used only to label/group hours when
+   reporting, not to redefine the bucket edges.
+
+**Sessions.** Four labels by UTC time-of-day, each an hour range for grouping the hourly volume
+buckets: **Asia Pacific (Sydney)**, **Asia (Tokyo)**, **London**, **New York**. Sample timestamps
+are ART (UTC-3) and must be converted first. Exact UTC hour ranges for the four labels are an
+implementation detail for the `add-synthetic-feed-fidelity` spec (standard FX session hours).
+
+**Acceptance threshold (settled).** **25% relative tolerance.** Each synthetic metric (return mean,
+return std-dev, hourly tick count) must fall within ±25% of the corresponding sample-derived value,
+per symbol, per hour/session bucket.
+
+**Weekend gap (settled).** Excluded. The sample's flat no-tick stretch is dropped from all
+return/volume statistics rather than counted as zero-activity hours.
 
 ---
 
@@ -255,6 +293,7 @@ Both: AOF and RDB.
 | 2 | **Live/historical stitching** — SETTLED: one-shot bootstrap snapshot endpoint on `streaming-gateway-svc` composes `N-1` closed + 1 forming; consumer then subscribes for forming-bar updates (see below). |
 | 3 | **Bucketing timestamp** — SETTLED in Thread B: bucket by `recv_ts` (event time); late ticks past `grace` are dropped + counted in Phase 1, watermark + possible bar revisions in Phase 2. |
 | 4 | **`seq` scope & reset** — SETTLED: `uint64` monotonic per `(provider, symbol)`, starts at 0 each adapter session, paired with a `session_id`; gap detection on `(session_id, seq)` (see below). |
+| 5 | **Symbol set** — SETTLED (revises Decision #2): the symbols present in the delivered tick-sample data are the source of truth, not a fixed "6 majors" list. 13 pairs: EURUSD, GBPUSD, AUDUSD, USDCAD, USDJPY, USDCHF (majors) + AUDJPY, EURGBP, EURJPY, GBPJPY, NZDJPY, NZDUSD, USDCNH (crosses). Any future addition/removal of a symbol is driven by adding/removing its sample file in `data/`. Actor count (Thread B), bar-msg throughput (Thread A), and Redis sizing (Thread C) are all recalculated for 13 symbols. |
 
 ### #1 — Repo / build structure (settled)
 
@@ -349,6 +388,33 @@ hot path with no persisted-counter write and unambiguous restart semantics.
 **Phase 2 note.** Real Dukascopy may expose its own provider-side sequence or gap signal; if so,
 carry it as a separate field and keep `(session_id, seq)` as the transport-level check.
 
+### #5 — Symbol set (settled, revises Decision #2)
+
+**The tick-sample data is the source of truth for the MVP symbol set.** Decision #2 in the
+architecture doc originally fixed "6 majors." That's superseded: whichever symbols have a sample
+file under `data/*.parquet` are in scope, full stop — currently 13:
+
+```
+Majors (6):  EURUSD  GBPUSD  AUDUSD  USDCAD  USDJPY  USDCHF
+Crosses (7): AUDJPY  EURGBP  EURJPY  GBPJPY  NZDJPY  NZDUSD  USDCNH
+```
+
+**Why tie it to the sample data.** `feed-adapter-synthetic`'s per-symbol calibration (Thread E)
+needs a sample for every symbol it generates. Making the sample set authoritative means the symbol
+list and the fidelity-calibration inputs can never drift apart — adding a symbol is "drop a
+`{SYMBOL}_Ticks_*.parquet` file in `data/`," not a separate config change made in two places.
+
+**Numbers this changes (recalculated above, not just relabeled):**
+- Thread A: LAN bar-message throughput ~1,440/sec -> **~3,120/sec** (13 symbols x 8 TFs x ~30/sec).
+- Thread B: actor count 48 -> **104** for synthetic alone (13 x 8 timeframes), 208 once Dukascopy
+  is added.
+- Thread C / Redis sizing: 4-6h retention ~325-500MB -> **~700MB-1.1GB**; 24h ~2-2.5GB ->
+  **~4.3-5.4GB**; the Thread C hard-cap backstop's `N` (~500MB/provider/6h) -> **~1.1GB**.
+
+**Not affected:** the 8-timeframe set, the per-`(provider,symbol,timeframe)` actor design itself,
+the bucketing/close/checkpoint semantics (Threads B/D) — none of those are symbol-count-dependent,
+only symbol-count-*multiplied*.
+
 ---
 
 ## Status
@@ -360,13 +426,16 @@ carry it as a separate field and keep `(session_id, seq)` as the transport-level
 | B — bar close / bucketing / Open | Settled: per-`(provider,symbol,timeframe)` actor, wheel timer posts close events into the in-process mailbox, `recv_ts` event-time bucketing, grace-delayed close (50-250 ms), late ticks dropped + counted (Phase 1), idle bars carry-forward, non-idle `Open` = first tick in window. |
 | C — stream trimming | Settled: consumer-position-driven trim + hard-cap backstop (N ~ few hours, Critical alert) + dead-consumer eviction. |
 | D — recovery | Settled: checkpoint stores O/H/L/C + last-consumed stream ID per actor; checkpoint on every bar close plus every ~1 s; `bar-persistence` dedups on `(provider,symbol,timeframe,bar_start_ts)`. |
-| E — synthetic fidelity | Approach settled: derive targets from a supplied 1-day tick sample per pair. Blocked on the sample files. Own change (`add-synthetic-feed-fidelity`). |
+| E — synthetic fidelity | Settled: sample data delivered (`data/*.parquet`); metrics = 1-min-grid log-return mean/std-dev + hourly tick count, both per symbol/session; 25% relative tolerance; weekend gap excluded. |
 | F — Redis durability | Settled: AOF + RDB both on. |
 | #2 live/historical stitching | Settled: one-shot bootstrap snapshot endpoint on `streaming-gateway-svc` (`N-1` closed + 1 forming, server-side stitch); consumer then subscribes for forming-bar updates. |
 | #3 timestamp authority | Settled by Thread B (`recv_ts`). |
 | #4 `seq` scope & reset | Settled: `uint64` monotonic per `(provider, symbol)`, resets to 0 each adapter session, paired with `session_id`; gap detection on `(session_id, seq)`; consumers key on `(provider, symbol, session_id, seq)`. |
+| #5 symbol set | Settled, revises Decision #2: 13 symbols (6 majors + 7 crosses), sourced from `data/*.parquet` — the sample data is the source of truth. Throughput/actor-count/Redis-sizing figures in A/B/C recalculated accordingly. |
 
-All threads settled. Thread E's approach is agreed but blocked on the per-pair 1-day tick samples.
+All threads settled, including E (calibration sample, metrics, thresholds) and #5 (symbol set).
 
-Ready to capture into OpenSpec: `add-price-pipeline` (A/B/C/D/F + smaller-items #2 and #4 + tick
-schema) and `add-synthetic-feed-fidelity` (E). See [`Capturing-Answers-in-OpenSpec.md`](./Capturing-Answers-in-OpenSpec.md).
+Ready to capture into OpenSpec: `add-price-pipeline` (A/B/C/D/F + smaller-items #2, #4, #5 + tick
+schema) and `add-synthetic-feed-fidelity` (E — calibration sample, fidelity metrics, sessions,
+acceptance threshold, weekend-gap handling). See
+[`Capturing-Answers-in-OpenSpec.md`](./Capturing-Answers-in-OpenSpec.md).

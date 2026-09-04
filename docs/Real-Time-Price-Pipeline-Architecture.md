@@ -14,8 +14,8 @@
 
 ## Decisions (resolved)
 
-1. **Providers, phased.** `synthetic` (a configurable-rate Python tick generator) is the only **active** provider — build and run the whole pipeline against it now. `dukascopy` (real market data) is **deferred to Phase 2**: Dukascopy's JForex-API is officially **Java-only** (no Python bindings), and the only officially-supported language-agnostic path — Dukascopy's FIX 4.4 API — requires a **$100,000 minimum deposit** or institutional "External Service Provider" approval, which isn't available now. See the research note below. Revisit when ready to build the Java/JForex component (or if FIX API eligibility changes).
-2. **Symbol set**: 6 majors — EURUSD, GBPUSD, AUDUSD, USDCAD, USDJPY, USDCHF — for whichever provider is active (synthetic now; Dukascopy when added).
+1. **Providers, phased.** `synthetic` (a configurable-rate Python tick generator) is the only **active** provider — build and run the whole pipeline against it now. `dukascopy` (real market data) is **deferred to Phase 2**: Dukascopy's JForex-API is officially **Java-only** (no Python bindings), and the only officially-supported language-agnostic path — Dukascopy's FIX 4.4 API — requires a **$100,000 minimum deposit** or institutional "External Service Provider" approval, which isn't available now. Revisit when ready to build the Java/JForex component (or if FIX API eligibility changes).
+2. **Symbol set**: 13 pairs — the symbols present in the delivered tick-sample data (`data/*.parquet`) are the source of truth. 6 majors (EURUSD, GBPUSD, AUDUSD, USDCAD, USDJPY, USDCHF) + 7 crosses (AUDJPY, EURGBP, EURJPY, GBPJPY, NZDJPY, NZDUSD, USDCNH) — for whichever provider is active (synthetic now; Dukascopy when added).
 3. **No cross-provider consolidated view.** Confirmed — per-provider tagging only, no blending, even once a second provider is active. Averaging "real" vs. "synthetic" (or two real providers with different microstructure) would be meaningless; any future consolidated view is a distinct, explicitly-labeled derived service, not a default behavior.
 4. **External consumers**: same LAN, separate host from the pipeline itself.
 5. **Aggregated-price SLA = live intrabar updates.** Every tick updates the currently-forming bar's O/H/L/C, not just the bar-close event.
@@ -23,18 +23,8 @@
 7. **Phase 1 scope**: the architecture stays multi-provider-ready (provider tagging, dynamic stream discovery, per-(provider,symbol) keys) end-to-end, but only the `synthetic` provider is built and deployed today. Adding `dukascopy` later is a new `feed-adapter-dukascopy` deployment — no redesign of `aggregation-svc` or anything downstream.
 8. **Synthetic generator fidelity**: the generator must approximate Dukascopy's real tick-rate and statistical properties, not just produce a naive random walk — it's the sole active data source for an extended period, and Phase 1 results need to be meaningfully comparable once Phase 2 (real data) arrives.
 9. **LAN gateway auth**: LAN-only network trust is sufficient for this stage — no authentication/access-control layer required yet. Revisit if the trust boundary changes (e.g., more hosts join the LAN).
-10. **aggregation-svc scaling**: confirmed — starts as a single shared instance across the active provider(s) and all 6 symbols.
+10. **aggregation-svc scaling**: confirmed — starts as a single shared instance across the active provider(s) and all 13 symbols.
 11. **Dukascopy (Phase 2) approach**: will be implemented as a Java component exposing prices over a **WebSocket** interface, built later. Implementation detail deferred until Phase 2 starts: whether a thin bridge republishes the WebSocket feed into Redis (preserving the existing `ticks.raw.dukascopy.{symbol}` contract) or downstream services consume the WebSocket directly.
-
-### Research note: Dukascopy API access options
-
-Checked directly against Dukascopy's own documentation (2026-09-01), since this determines what's actually buildable, not just preferable:
-
-| Option | Language | Cost/eligibility | Capability |
-|---|---|---|---|
-| **JForex-API** | **Java only** — no official Python bindings | No minimum deposit stated | Live/historical data + order execution, hosted strategy or standalone Java app |
-| **FIX 4.4 API** | Language-agnostic (any FIX engine, e.g. QuickFIX) | **$100,000 minimum deposit**, or institutional partner approval | Real-time streaming prices, order submission/mgmt, FX only |
-| REST / WebSocket | — | — | **Not offered.** No official first-party REST/WebSocket API exists; community tools (dukascopy-node, pyforex/Jython) are unofficial, not Dukascopy-supported |
 
 ## Scope and assumptions
 
@@ -55,7 +45,7 @@ Checked directly against Dukascopy's own documentation (2026-09-01), since this 
 | **bar-persistence-svc** | Discover and consume closed-bar streams across all providers, batch-write durably | `bars` table (sole writer) | — | Redis streams `bars.*.*`, closed only | Horizontal via consumer groups |
 | **streaming-gateway-svc** | Relay live ticks/bars to LAN consumers over WebSocket, filterable by provider; slow-consumer policy | None | WebSocket API | Redis streams (all providers) | Horizontal; sticky routing beyond 1 instance (not yet) |
 | **historical-query-svc** | Stateless REST for historical queries/backfill, filterable by provider | None — reads ticks/bars (documented exception) | REST API | PostgreSQL (read-only) | Horizontal, stateless |
-| **edge-gateway** *(optional)* | Single LAN-facing entrypoint: TLS/basic auth, routing, rate limiting | None | HTTPS / WSS | streaming-gateway-svc, historical-query-svc | Horizontal, stateless |
+| **edge-gateway** *(not in scope — deferred with decision #9)* | Would be a single LAN-facing entrypoint (TLS, routing, rate limiting) if the trust boundary ever changes; not built now | None | HTTPS / WSS | streaming-gateway-svc, historical-query-svc | Horizontal, stateless |
 
 Platform components: Redis (bus + checkpoint store), PostgreSQL + TimescaleDB (system of record).
 
@@ -105,7 +95,7 @@ Platform components: Redis (bus + checkpoint store), PostgreSQL + TimescaleDB (s
               historical-query-svc  [SERVICE]                    |
                         \                                        |
                          v                                       v
-                        edge-gateway  [optional: TLS/auth/routing]
+                        edge-gateway  [deferred — decision #9; not in Phase 1]
                                      |
                                      v
                     External Consumers (same LAN, separate host)
@@ -113,7 +103,7 @@ Platform components: Redis (bus + checkpoint store), PostgreSQL + TimescaleDB (s
 
 ## Why feed-adapter and aggregation-svc stay split
 
-The previous version of this design combined feed handling and aggregation into one process to avoid a network hop on the <10ms critical path — correct *given* both were in the same language/process. That assumption held for exactly as long as Dukascopy looked like it might be built in Python. It isn't: JForex-API is officially Java-only, with no free Python-compatible alternative (see research note above). So the split stays, for a forward-looking reason rather than a today reason:
+The previous version of this design combined feed handling and aggregation into one process to avoid a network hop on the <10ms critical path — correct *given* both were in the same language/process. That assumption held for exactly as long as Dukascopy looked like it might be built in Python. It isn't: JForex-API is officially Java-only, with no free Python-compatible alternative. So the split stays, for a forward-looking reason rather than a today reason:
 
 **Today**, with only `synthetic` (Python) active, a combined single-process design would technically be possible and would save the ~1-2ms of network-hop latency. **But** Dukascopy's eventual return is very likely a Java component again — nothing about deferring it changes that constraint. Keeping `feed-adapter-{provider}` and `aggregation-svc` separate now means:
 
@@ -151,18 +141,18 @@ This budget covers tick-received → bar-published-to-Redis. Delivery from strea
 
 ## LAN consumer delivery
 
-External consumers are same-LAN, separate host — not localhost, not open internet. Two consequences: streaming-gateway-svc and historical-query-svc (or edge-gateway, if used) need to bind to a LAN-reachable interface rather than `127.0.0.1`; and since the API is now reachable by anything on the LAN rather than only local processes, basic access control (an API key or LAN-scoped auth) is worth having even though this isn't internet-facing — "same LAN" is not the same trust boundary as "same process." LAN round-trip latency is typically sub-millisecond to a few ms depending on network quality — small compared to the internal budget, but it's a genuinely separate number from the internal <10ms figure, not part of it.
+External consumers are same-LAN, separate host — not localhost, not open internet. Consequence: streaming-gateway-svc and historical-query-svc (or edge-gateway, if used) need to bind to a LAN-reachable interface rather than `127.0.0.1`. Per decision #9, LAN network trust is sufficient at this stage — no authentication or access-control layer (API key, LAN-scoped auth) is added now; revisit if the trust boundary changes. LAN round-trip latency is typically sub-millisecond to a few ms depending on network quality — small compared to the internal budget, but it's a genuinely separate number from the internal <10ms figure, not part of it.
 
-## Redis memory sizing (concrete, Phase 1: 6 symbols × 1 active provider)
+## Redis memory sizing (concrete, Phase 1: 13 symbols × 1 active provider)
 
-6 `(provider, symbol)` combinations (`synthetic` only, for now). At a representative ~30 ticks/sec/pair (combined bid/ask, retail-feed order of magnitude) × 6 ≈ 180 ticks/sec total, ~100–150 bytes/stream-entry:
+13 `(provider, symbol)` combinations (`synthetic` only, for now). At a representative ~30 ticks/sec/pair (combined bid/ask, retail-feed order of magnitude) × 13 ≈ 390 ticks/sec total, ~100–150 bytes/stream-entry:
 
 | Retention window | Approx. memory |
 |---|---|
-| 4–6 hours | roughly 325–500MB |
-| 24 hours | roughly 2–2.5GB |
+| 4–6 hours | roughly 700MB–1.1GB |
+| 24 hours | roughly 4.3–5.4GB |
 
-This **roughly doubles** once `dukascopy` is added as a second active provider (12 combinations, as previously estimated: ~650MB–1GB for 4–6h, ~4–5GB for 24h) — worth budgeting Redis memory for that from the start even though it isn't needed yet. The synthetic provider's rate is fully controllable — dial it down for routine testing, or up to stress-test the aggregation-svc hop specifically.
+This **roughly doubles** once `dukascopy` is added as a second active provider (26 combinations: ~1.4–2.2GB for 4–6h, ~8.7–10.8GB for 24h) — worth budgeting Redis memory for that from the start even though it isn't needed yet. The synthetic provider's rate is fully controllable — dial it down for routine testing, or up to stress-test the aggregation-svc hop specifically.
 
 ## Failure isolation (blast radius per service, Phase 1)
 

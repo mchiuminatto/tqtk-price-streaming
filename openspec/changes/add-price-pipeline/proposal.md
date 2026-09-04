@@ -18,8 +18,9 @@ plan.
   (`ticks.raw.{provider}.{symbol}`, `bars.{tf}.{provider}.{symbol}`,
   `bar_state:{provider}:{symbol}:{tf}`), provider tagging on every record, `seq` and dual
   timestamps (`provider_ts`, `recv_ts`).
-- **feed-adapter-synthetic**: configurable-rate synthetic tick generation for 6 majors, provider
-  tagging, `recv_ts` stamping, monotonic `seq`, publish raw ticks only.
+- **feed-adapter-synthetic**: configurable-rate synthetic tick generation for the 13-symbol set
+  (6 majors + 7 crosses — the symbols present in the `data/*.parquet` tick sample are the source of
+  truth), provider tagging, `recv_ts` stamping, monotonic `seq`, publish raw ticks only.
 - **aggregation-svc**: per-`(provider, symbol, timeframe)` actor model; every tick updates the
   forming bar on all 8 timeframes (1s..1D); `recv_ts` event-time bucketing; time-driven
   grace-delayed bar close via a wheel timer that posts close events into the in-process mailbox;

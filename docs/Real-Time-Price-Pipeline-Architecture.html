@@ -95,8 +95,8 @@
 
   <h2>Decisions (resolved)</h2>
   <ol class="decisions">
-    <li><strong>Providers, phased.</strong> <code>synthetic</code> (configurable-rate Python tick generator) is the only <strong>active</strong> provider — build and run the whole pipeline against it now. <code>dukascopy</code> (real market data) is <strong>deferred to Phase 2</strong>: Dukascopy's JForex-API is officially Java-only (no Python bindings), and the only officially-supported language-agnostic path — Dukascopy's FIX 4.4 API — requires a $100,000 minimum deposit or institutional approval, not available now. See the research note below.</li>
-    <li><strong>Symbol set</strong>: 6 majors — EURUSD, GBPUSD, AUDUSD, USDCAD, USDJPY, USDCHF — for whichever provider is active.</li>
+    <li><strong>Providers, phased.</strong> <code>synthetic</code> (configurable-rate Python tick generator) is the only <strong>active</strong> provider — build and run the whole pipeline against it now. <code>dukascopy</code> (real market data) is <strong>deferred to Phase 2</strong>: Dukascopy's JForex-API is officially Java-only (no Python bindings), and the only officially-supported language-agnostic path — Dukascopy's FIX 4.4 API — requires a $100,000 minimum deposit or institutional approval, not available now.</li>
+    <li><strong>Symbol set</strong>: 13 pairs — the symbols present in the delivered tick-sample data (<code>data/*.parquet</code>) are the source of truth. 6 majors (EURUSD, GBPUSD, AUDUSD, USDCAD, USDJPY, USDCHF) + 7 crosses (AUDJPY, EURGBP, EURJPY, GBPJPY, NZDJPY, NZDUSD, USDCNH) — for whichever provider is active.</li>
     <li><strong>No cross-provider consolidated view.</strong> Confirmed — per-provider tagging only, no blending, even once a second provider is active.</li>
     <li><strong>External consumers</strong>: same LAN, separate host from the pipeline itself.</li>
     <li><strong>Aggregated-price SLA = live intrabar updates.</strong> Every tick updates the currently-forming bar's O/H/L/C, not just the bar-close event.</li>
@@ -104,22 +104,9 @@
     <li><strong>Phase 1 scope</strong>: the architecture stays multi-provider-ready end-to-end (tagging, dynamic stream discovery, per-(provider,symbol) keys), but only <code>synthetic</code> is built and deployed today. Adding <code>dukascopy</code> later is a new <code>feed-adapter-dukascopy</code> deployment — no redesign of <code>aggregation-svc</code> or anything downstream.</li>
     <li><strong>Synthetic generator fidelity</strong>: the generator must approximate Dukascopy's real tick-rate and statistical properties, not just a naive random walk — it's the sole active data source for an extended period, and Phase 1 results need to be meaningfully comparable once Phase 2 (real data) arrives.</li>
     <li><strong>LAN gateway auth</strong>: LAN-only network trust is sufficient for this stage — no authentication/access-control layer required yet. Revisit if the trust boundary changes.</li>
-    <li><strong>aggregation-svc scaling</strong>: confirmed — starts as a single shared instance across the active provider(s) and all 6 symbols.</li>
+    <li><strong>aggregation-svc scaling</strong>: confirmed — starts as a single shared instance across the active provider(s) and all 13 symbols.</li>
     <li><strong>Dukascopy (Phase 2) approach</strong>: will be implemented as a Java component exposing prices over a <strong>WebSocket</strong> interface, built later. Implementation detail deferred until Phase 2 starts: whether a thin bridge republishes the WebSocket feed into Redis (preserving the existing <code>ticks.raw.dukascopy.{symbol}</code> contract) or downstream services consume the WebSocket directly.</li>
   </ol>
-
-  <h3>Research note: Dukascopy API access options</h3>
-  <p style="font-size:0.9rem;color:var(--muted);">Checked directly against Dukascopy's own documentation (2026-09-01), since this determines what's actually buildable, not just preferable.</p>
-  <div class="table-scroll">
-  <table>
-    <thead><tr><th>Option</th><th>Language</th><th>Cost / eligibility</th><th>Capability</th></tr></thead>
-    <tbody>
-      <tr><td><strong>JForex-API</strong></td><td><strong>Java only</strong> — no official Python bindings</td><td>No minimum deposit stated</td><td>Live/historical data + order execution, hosted strategy or standalone Java app</td></tr>
-      <tr><td><strong>FIX 4.4 API</strong></td><td>Language-agnostic (any FIX engine, e.g. QuickFIX)</td><td><strong>$100,000 minimum deposit</strong>, or institutional partner approval</td><td>Real-time streaming prices, order submission/mgmt, FX only</td></tr>
-      <tr><td>REST / WebSocket</td><td>—</td><td>—</td><td><strong>Not offered.</strong> No official first-party API; community tools (dukascopy-node, pyforex/Jython) are unofficial</td></tr>
-    </tbody>
-  </table>
-  </div>
 
   <h2>Scope and assumptions</h2>
   <div class="callout"><strong>10ms budget = internal processing latency</strong> (tick received → aggregate published on the bus), not wall-clock to a remote consumer.</div>
@@ -140,7 +127,7 @@
       <tr><td><strong>bar-persistence-svc</strong></td><td>Discover &amp; consume closed bars across all providers, batch-write durably</td><td><code>bars</code> table (sole writer)</td><td>—</td><td><code>bars.*.*</code>, closed only</td><td>Horizontal via consumer groups</td></tr>
       <tr><td><strong>streaming-gateway-svc</strong></td><td>Relay live ticks/bars to LAN consumers over WebSocket, filterable by provider</td><td>None</td><td>WS API</td><td>Redis streams (all providers)</td><td>Horizontal; sticky routing beyond 1 instance (not yet)</td></tr>
       <tr><td><strong>historical-query-svc</strong></td><td>Stateless REST for historical queries/backfill, filterable by provider</td><td>None (reads ticks/bars)</td><td>REST API</td><td>PostgreSQL (read-only)</td><td>Horizontal, stateless</td></tr>
-      <tr><td><strong>edge-gateway</strong> <em>(optional)</em></td><td>Single LAN-facing entrypoint: TLS/auth, routing, rate limiting</td><td>None</td><td>HTTPS / WSS</td><td>streaming-gateway-svc, historical-query-svc</td><td>Horizontal, stateless</td></tr>
+      <tr><td><strong>edge-gateway</strong> <em>(not in scope — deferred with decision #9)</em></td><td>Would be a single LAN-facing entrypoint (TLS, routing, rate limiting) if the trust boundary ever changes; not built now</td><td>None</td><td>HTTPS / WSS</td><td>streaming-gateway-svc, historical-query-svc</td><td>Horizontal, stateless</td></tr>
     </tbody>
   </table>
   </div>
@@ -148,7 +135,7 @@
 
   <h2>Service topology</h2>
   <div class="diagram-card">
-    <svg viewBox="0 0 1180 1070" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Microservice topology: a Synthetic Generator feeds feed-adapter-synthetic, the only active feed-adapter, which publishes raw ticks to Redis. Dukascopy and feed-adapter-dukascopy are shown as planned but not yet built, deferred to Phase 2 pending a Java/JForex integration. A shared aggregation-svc reads active provider tick streams from Redis and writes bar updates back to Redis. Redis fans out to tick-persistence-svc, bar-persistence-svc, and streaming-gateway-svc. The two persistence services write to PostgreSQL, which historical-query-svc reads from. historical-query-svc and streaming-gateway-svc both feed an optional edge-gateway serving LAN-based external consumers.">
+    <svg viewBox="0 0 1180 1070" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Microservice topology: a Synthetic Generator feeds feed-adapter-synthetic, the only active feed-adapter, which publishes raw ticks to Redis. Dukascopy and feed-adapter-dukascopy are shown as planned but not yet built, deferred to Phase 2 pending a Java/JForex integration. A shared aggregation-svc reads active provider tick streams from Redis and writes bar updates back to Redis. Redis fans out to tick-persistence-svc, bar-persistence-svc, and streaming-gateway-svc. The two persistence services write to PostgreSQL, which historical-query-svc reads from. historical-query-svc and streaming-gateway-svc both feed a deferred (not built) edge-gateway box, kept in the diagram to show where it would sit if the LAN trust boundary ever changes, serving LAN-based external consumers.">
       <defs>
         <marker id="arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
           <path d="M0,0 L10,5 L0,10 z" fill="#4a5568"/>
@@ -269,8 +256,8 @@
 
       <!-- edge-gateway -->
       <rect x="340" y="888" width="500" height="70" rx="8" fill="#eafaf3" stroke="#2f9e6c" stroke-width="1.5" stroke-dasharray="5 3"/>
-      <text x="590" y="914" text-anchor="middle" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" font-weight="700" fill="#1a2233">edge-gateway (optional)</text>
-      <text x="590" y="932" text-anchor="middle" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="10" fill="#5b6579">TLS/auth · routing · rate limit</text>
+      <text x="590" y="914" text-anchor="middle" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="13" font-weight="700" fill="#1a2233">edge-gateway (deferred, decision #9)</text>
+      <text x="590" y="932" text-anchor="middle" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="10" fill="#5b6579">not built — LAN trust sufficient for now</text>
 
       <line x1="590" y1="958" x2="590" y2="976" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arrow)"/>
 
@@ -284,14 +271,14 @@
       <span><span class="swatch" style="background:#f4f5f7;border:1.5px dotted #9aa1ac;"></span>planned / deferred — Phase 2, not built</span>
       <span><span class="swatch" style="background:#eef4fc;border:1.5px solid #3b6fa0;"></span>microservice</span>
       <span><span class="swatch" style="background:#f5f0fc;border:1.5px solid #7c5cbf;"></span>platform / shared infra</span>
-      <span><span class="swatch" style="background:#eafaf3;border:1.5px dashed #2f9e6c;"></span>edge (optional)</span>
+      <span><span class="swatch" style="background:#eafaf3;border:1.5px dashed #2f9e6c;"></span>edge (deferred, not built)</span>
       <span><span class="swatch" style="background:#eef0f5;border:1.5px solid #6b7280;"></span>external actor</span>
       <span><span class="line-sample dashed"></span>off-path / documented exception</span>
     </div>
   </div>
 
   <h2>Why feed-adapter and aggregation-svc stay split</h2>
-  <p>The previous version of this design combined feed handling and aggregation into one process to avoid a network hop on the &lt;10ms critical path — correct <em>given</em> both were in the same language/process. That assumption held for exactly as long as Dukascopy looked like it might be built in Python. It isn't: JForex-API is officially Java-only, with no free Python-compatible alternative (see research note above). So the split stays, for a forward-looking reason rather than a today reason.</p>
+  <p>The previous version of this design combined feed handling and aggregation into one process to avoid a network hop on the &lt;10ms critical path — correct <em>given</em> both were in the same language/process. That assumption held for exactly as long as Dukascopy looked like it might be built in Python. It isn't: JForex-API is officially Java-only, with no free Python-compatible alternative. So the split stays, for a forward-looking reason rather than a today reason.</p>
   <p><strong>Today</strong>, with only <code>synthetic</code> (Python) active, a combined single-process design would technically be possible and would save the ~1–2ms of network-hop latency. <strong>But</strong> Dukascopy's eventual return is very likely a Java component again — nothing about deferring it changes that constraint. Keeping <code>feed-adapter-{provider}</code> and <code>aggregation-svc</code> separate now means:</p>
   <ol>
     <li>Adding <code>feed-adapter-dukascopy</code> later is purely additive — a new Java service that publishes to a Redis stream <code>aggregation-svc</code> already knows how to discover. No rework of aggregation logic, no re-architecture.</li>
@@ -323,18 +310,18 @@ Bar:   { provider, symbol, timeframe, bar_start_ts, open, high, low, close,
   <p>This budget covers tick-received → bar-published-to-Redis. Delivery from streaming-gateway-svc to a LAN consumer is a separate hop again.</p>
 
   <h2>LAN consumer delivery</h2>
-  <p>External consumers are same-LAN, separate host — not localhost, not open internet. Two consequences: streaming-gateway-svc and historical-query-svc (or edge-gateway) need to bind to a LAN-reachable interface rather than <code>127.0.0.1</code>; and since the API is reachable by anything on the LAN rather than only local processes, basic access control (an API key or LAN-scoped auth) is worth having even though this isn't internet-facing — "same LAN" is not the same trust boundary as "same process." LAN round-trip latency is typically sub-millisecond to a few ms — small relative to the internal budget, but a genuinely separate number, not part of it.</p>
+  <p>External consumers are same-LAN, separate host — not localhost, not open internet. Consequence: streaming-gateway-svc and historical-query-svc (or edge-gateway, if used) need to bind to a LAN-reachable interface rather than <code>127.0.0.1</code>. Per decision #9, LAN network trust is sufficient at this stage — no authentication or access-control layer (API key, LAN-scoped auth) is added now; revisit if the trust boundary changes. LAN round-trip latency is typically sub-millisecond to a few ms — small relative to the internal budget, but a genuinely separate number, not part of it.</p>
 
-  <h2>Redis memory sizing (concrete, Phase 1: 6 symbols × 1 active provider)</h2>
-  <p>6 (provider, symbol) combinations (<code>synthetic</code> only, for now). At a representative ~30 ticks/sec/pair × 6 ≈ 180 ticks/sec total, ~100–150 bytes/entry:</p>
+  <h2>Redis memory sizing (concrete, Phase 1: 13 symbols × 1 active provider)</h2>
+  <p>13 (provider, symbol) combinations (<code>synthetic</code> only, for now). At a representative ~30 ticks/sec/pair × 13 ≈ 390 ticks/sec total, ~100–150 bytes/entry:</p>
   <table>
     <thead><tr><th>Retention window</th><th>Approx. memory</th></tr></thead>
     <tbody>
-      <tr><td>4–6 hours</td><td>roughly 325–500MB</td></tr>
-      <tr><td>24 hours</td><td>roughly 2–2.5GB</td></tr>
+      <tr><td>4–6 hours</td><td>roughly 700MB–1.1GB</td></tr>
+      <tr><td>24 hours</td><td>roughly 4.3–5.4GB</td></tr>
     </tbody>
   </table>
-  <p style="font-size:0.85rem;color:var(--muted);">This roughly <strong>doubles</strong> once <code>dukascopy</code> is added as a second active provider (12 combinations: ~650MB–1GB for 4–6h, ~4–5GB for 24h) — worth budgeting Redis memory for that from the start. The synthetic provider's rate is fully controllable.</p>
+  <p style="font-size:0.85rem;color:var(--muted);">This roughly <strong>doubles</strong> once <code>dukascopy</code> is added as a second active provider (26 combinations: ~1.4–2.2GB for 4–6h, ~8.7–10.8GB for 24h) — worth budgeting Redis memory for that from the start. The synthetic provider's rate is fully controllable.</p>
 
   <h2>Failure isolation (blast radius, Phase 1)</h2>
   <table>

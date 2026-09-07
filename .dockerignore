@@ -5,6 +5,7 @@
 
 # Version control and editor/tooling state
 .git/
+.github/
 .gitignore
 .idea/
 .claude/
@@ -16,10 +17,11 @@
 # Sample tick data (~53MB) — mounted or loaded at run time, never baked in
 data/
 
-# Planning artifacts, documentation, deployment assets
+# Planning artifacts, documentation, deployment assets, CI tooling
 docs/
 openspec/
 deploy/
+tools/
 
 # Python build and test caches
 **/__pycache__/

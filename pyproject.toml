@@ -27,4 +27,7 @@ line-length = 100
 target-version = "py312"
 
 [tool.pytest.ini_options]
-testpaths = ["libs", "services"]
+testpaths = ["libs", "services", "tools"]
+# `tools` is not an installed package, so the repo root has to be importable
+# for `from tools.ci.affected_members import ...` to resolve.
+pythonpath = ["."]

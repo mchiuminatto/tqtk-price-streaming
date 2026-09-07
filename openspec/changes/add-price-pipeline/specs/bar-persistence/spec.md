@@ -56,3 +56,22 @@ aggregation.
 #### Scenario: Bar-persistence service is down
 - **WHEN** the bar-persistence service is down
 - **THEN** feed adapters and aggregation continue operating unaffected
+
+### Requirement: Owns the bars table schema
+The bar-persistence service SHALL own the `bars` table's DDL and migrations, applying them on
+startup before it begins consuming. Its migrations SHALL conform to the additive-only rule of the
+`data-contract` capability, and it SHALL declare the `schema_version` it produces.
+
+#### Scenario: The service starts against an empty database
+- **WHEN** the bar-persistence service starts against a database with no `bars` table
+- **THEN** it applies its migrations to create the table and its indexes, and only then reports
+  ready and begins consuming
+
+#### Scenario: The service starts against an up-to-date database
+- **WHEN** the service starts against a database already at its declared `schema_version`
+- **THEN** it applies no migration, reports ready, and begins consuming
+
+#### Scenario: Contract conformance is verified
+- **WHEN** the service's storage contract test runs
+- **THEN** it asserts the schema its migrations produce matches the declared `schema_version` in
+  the storage contract artifact

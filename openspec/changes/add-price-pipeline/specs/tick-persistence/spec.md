@@ -47,3 +47,22 @@ aggregation.
 - **WHEN** the tick-persistence service is down
 - **THEN** feed adapters continue publishing and aggregation continues producing bar updates
   unaffected
+
+### Requirement: Owns the ticks table schema
+The tick-persistence service SHALL own the `ticks` table's DDL and migrations, applying them on
+startup before it begins consuming. Its migrations SHALL conform to the additive-only rule of the
+`data-contract` capability, and it SHALL declare the `schema_version` it produces.
+
+#### Scenario: The service starts against an empty database
+- **WHEN** the tick-persistence service starts against a database with no `ticks` table
+- **THEN** it applies its migrations to create the table and its indexes, and only then reports
+  ready and begins consuming
+
+#### Scenario: The service starts against an up-to-date database
+- **WHEN** the service starts against a database already at its declared `schema_version`
+- **THEN** it applies no migration, reports ready, and begins consuming
+
+#### Scenario: Contract conformance is verified
+- **WHEN** the service's storage contract test runs
+- **THEN** it asserts the schema its migrations produce matches the declared `schema_version` in
+  the storage contract artifact

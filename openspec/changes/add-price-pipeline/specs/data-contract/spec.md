@@ -1,8 +1,9 @@
-## Purpose
+  ## Purpose
 
-Defines the single, language-neutral `Tick`/`Bar` record schema, Redis stream/key naming, and
-provider/sequence identity rules that every feed adapter and every consumer — regardless of
-implementation language — must conform to.
+Defines the pipeline's contract surfaces: the single, language-neutral `Tick`/`Bar` record
+schema, Redis stream/key naming, and provider/sequence identity rules that every feed adapter and
+every consumer — regardless of implementation language — must conform to, plus the versioned
+`ticks`/`bars` storage schema that persistence services own and read-side consumers bind to.
 
 ## ADDED Requirements
 
@@ -91,3 +92,75 @@ implementation language can conform to the same contract.
   language publishes a tick
 - **THEN** the record matches the same `Tick` schema and stream-naming contract as adapters
   written in the primary language
+
+### Requirement: Versioned storage schema contract
+The `ticks` and `bars` table schemas SHALL be defined as an explicit, versioned contract artifact
+carrying a `schema_version`, maintained alongside the language-neutral `Tick`/`Bar` wire schema
+rather than existing only as whatever DDL happens to have been applied to the database.
+
+#### Scenario: A service binds to the storage schema
+- **WHEN** a service reads from or writes to the `ticks` or `bars` table
+- **THEN** the schema it depends on is defined by the versioned storage contract artifact, and the
+  `schema_version` it was built against is identifiable
+
+#### Scenario: The storage schema changes
+- **WHEN** a column is added to the `ticks` or `bars` table
+- **THEN** the storage contract artifact is updated and its `schema_version` is incremented in the
+  same change
+
+### Requirement: Table DDL ownership follows sole-writer ownership
+The service designated as the sole writer of a table SHALL also own that table's DDL and
+migrations. No table's schema SHALL be created or altered by platform bootstrap, by a service that
+is not its sole writer, or by any out-of-band manual step.
+
+#### Scenario: A table's schema is created or altered
+- **WHEN** the `ticks` or `bars` table is created or its schema is altered
+- **THEN** the change was applied by that table's sole-writer service, not by platform bootstrap or
+  by any other service
+
+### Requirement: Additive-only schema evolution
+Within a released `schema_version` lineage, storage schema changes SHALL be additive only. A
+migration SHALL NOT drop a column, rename a column, or narrow a column's type. A newly added
+column SHALL be nullable or carry a default, so that a reader built against an earlier
+`schema_version` continues to function unchanged.
+
+#### Scenario: An additive migration is applied
+- **WHEN** a migration adds a nullable or defaulted column to `ticks` or `bars`
+- **THEN** a read-side consumer built against the previous `schema_version` continues to serve
+  queries without modification
+
+#### Scenario: A destructive migration is proposed
+- **WHEN** a migration would drop a column, rename a column, or narrow a column's type on `ticks`
+  or `bars`
+- **THEN** it is rejected before merge rather than being applied to the database
+
+### Requirement: Declared read-side consumers
+A service that reads a table it does not own SHALL declare, as configuration or code, the
+`schema_version` it binds to. Reading a table without a declared version binding SHALL NOT be
+permitted.
+
+#### Scenario: A read-side service starts
+- **WHEN** a service that reads a table it does not own starts up
+- **THEN** the `schema_version` it binds to is declared and observable, not implicit in its queries
+
+#### Scenario: The declared version is no longer available
+- **WHEN** a read-side consumer's declared `schema_version` is absent from the database it connects
+  to
+- **THEN** the service fails its readiness check rather than serving queries against an
+  unrecognized schema
+
+### Requirement: Storage contract tests on both sides
+Both the owning writer and every declared read-side consumer of a table SHALL have automated tests
+asserting conformance to the storage contract — the writer that it produces the contracted schema,
+the reader that it consumes it — exercised against a shared fixture derived from the contract
+artifact.
+
+#### Scenario: A writer breaks the contract
+- **WHEN** a sole-writer service's migrations no longer produce the schema described by its
+  declared `schema_version`
+- **THEN** its contract test fails
+
+#### Scenario: A reader breaks the contract
+- **WHEN** a read-side consumer queries a column or type absent from its declared `schema_version`
+- **THEN** its contract test fails against the shared fixture, without requiring a running instance
+  of the writing service

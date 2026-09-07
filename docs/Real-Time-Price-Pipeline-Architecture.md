@@ -41,13 +41,13 @@
 | **feed-adapter-synthetic** | Generate configurable-rate synthetic ticks; tag `provider="synthetic"`; publish raw ticks only | None | Redis stream `ticks.raw.synthetic.{symbol}` | Internal generator, no external dependency | One instance |
 | **feed-adapter-dukascopy** *(Phase 2 — planned, not built)* | Connect to Dukascopy (JForex, Java); normalize + tag `provider="dukascopy"`; publish raw ticks only | None | Redis stream `ticks.raw.dukascopy.{symbol}` | Dukascopy feed (external) | One instance (single provider session) |
 | **aggregation-svc** | Discover and consume raw-tick streams across **all active** providers; maintain live OHLCV bar state per `(provider, symbol, timeframe)`; checkpoint for crash recovery | None persistent (in-memory + Redis checkpoint) | Redis streams `bars.{tf}.{provider}.{symbol}`; checkpoint key `bar_state:{provider}:{symbol}` | Redis stream `ticks.raw.*` (all providers, dynamically discovered) | Single shared instance to start; shardable by symbol or provider later if measurement shows it's needed |
-| **tick-persistence-svc** | Discover and consume raw-tick streams across all providers, batch-write durably | `ticks` table (sole writer) | — | Redis streams `ticks.raw.*` | Horizontal via consumer groups |
-| **bar-persistence-svc** | Discover and consume closed-bar streams across all providers, batch-write durably | `bars` table (sole writer) | — | Redis streams `bars.*.*`, closed only | Horizontal via consumer groups |
+| **tick-persistence-svc** | Discover and consume raw-tick streams across all providers, batch-write durably | `ticks` table — sole writer of both its rows and its DDL/migrations | — | Redis streams `ticks.raw.*` | Horizontal via consumer groups |
+| **bar-persistence-svc** | Discover and consume closed-bar streams across all providers, batch-write durably | `bars` table — sole writer of both its rows and its DDL/migrations | — | Redis streams `bars.*.*`, closed only | Horizontal via consumer groups |
 | **streaming-gateway-svc** | Relay live ticks/bars to LAN consumers over WebSocket, filterable by provider; slow-consumer policy | None | WebSocket API | Redis streams (all providers) | Horizontal; sticky routing beyond 1 instance (not yet) |
-| **historical-query-svc** | Stateless REST for historical queries/backfill, filterable by provider | None — reads ticks/bars (documented exception) | REST API | PostgreSQL (read-only) | Horizontal, stateless |
+| **historical-query-svc** | Stateless REST for historical queries/backfill, filterable by provider | None — declared read-side consumer bound to a storage `schema_version` | REST API | PostgreSQL (read-only) | Horizontal, stateless |
 | **edge-gateway** *(not in scope — deferred with decision #9)* | Would be a single LAN-facing entrypoint (TLS, routing, rate limiting) if the trust boundary ever changes; not built now | None | HTTPS / WSS | streaming-gateway-svc, historical-query-svc | Horizontal, stateless |
 
-Platform components: Redis (bus + checkpoint store), PostgreSQL + TimescaleDB (system of record).
+Platform components: Redis (bus + checkpoint store), PostgreSQL + TimescaleDB (system of record — the server and extension only; the `ticks` and `bars` tables are created by their owning services' migrations, not by platform bootstrap).
 
 ## High-level architecture
 
@@ -123,6 +123,18 @@ Bar:   { provider, symbol, timeframe, bar_start_ts, open, high, low, close,
 ```
 
 Redis streams: `ticks.raw.{provider}.{symbol}`, `bars.{timeframe}.{provider}.{symbol}`. Postgres/TimescaleDB: `ticks` hypertable indexed on `(provider, symbol, ts)`; `bars` hypertable indexed on `(provider, symbol, timeframe, bar_start_ts)`.
+
+### Two contract surfaces, both versioned
+
+The `Tick`/`Bar` records above are the **wire contract** — defined language-neutrally (JSON Schema or `.proto`) so a future Java adapter conforms without importing the Python package. The `ticks`/`bars` table schema is a **second contract surface**, and gets the same treatment rather than being left as whatever DDL happens to have been applied:
+
+- **Versioned artifact.** The table schema carries an explicit `schema_version` and lives beside the wire schema, not only in the database.
+- **DDL ownership follows sole-writer ownership.** `tick-persistence-svc` owns the `ticks` schema; `bar-persistence-svc` owns `bars`. Each applies its own migrations on startup, under a Postgres advisory lock so concurrent instances migrate exactly once. Nothing is created by platform bootstrap or by an out-of-band manual step.
+- **Additive-only evolution.** Within a released version lineage: no `DROP`, no `RENAME`, no type-narrowing; new columns are nullable or defaulted. Enforced by a CI check, not by review discipline.
+- **Declared read-side consumers.** `historical-query-svc` reads tables it does not own — a CQRS read model, which is a legitimate pattern. It binds to a named `schema_version` and fails its readiness check rather than serving queries against an unrecognized schema.
+- **Contract tests on both sides.** The writer asserts it produces the contracted schema; the reader asserts every column and type its queries touch is present in the version it declares. Both run against a shared fixture built from the contract artifact, so the reader's test needs no running persistence service.
+
+**Why this matters:** without it, a column rename in `tick-persistence-svc` silently breaks `historical-query-svc` at runtime, with no test to catch it and no safe deploy order between them — the shared-database coupling that would otherwise disqualify `historical-query-svc` as an independently deployable service. **The alternative rejected** was having the persistence services serve historical queries themselves: it puts read load on the write path this design works to keep clear, and adds a hop to every historical query for no isolation the versioned contract doesn't already give.
 
 `seq` is `uint64`, monotonic and gapless **per `(provider, symbol)`**, and **resets to 0 on every feed-adapter (re)start**. `session_id` identifies one adapter session for that stream, so consumers do gap detection on `(session_id, seq)` — a `seq` jump within a session is real tick loss; a `session_id` change is an expected restart, not loss. Dedup/reconciliation keys on `(provider, symbol, session_id, seq)`. See [`Architecture-Open-Questions.md`](./Architecture-Open-Questions.md) §#4.
 
@@ -230,7 +242,7 @@ Deliberately minimal — 2 containers, not 6. This is the low-complexity option:
 ## Deployment model
 
 - **feed-adapter-synthetic**: Python, own Dockerfile, configurable tick-rate and symbol set via env/config.
-- **aggregation-svc, tick-persistence-svc, bar-persistence-svc, streaming-gateway-svc, historical-query-svc**: Python, own Dockerfile each, own 12-factor config, own `/health`, `/ready`, `/metrics`.
+- **aggregation-svc, tick-persistence-svc, bar-persistence-svc, streaming-gateway-svc, historical-query-svc**: Python, own Dockerfile each, own 12-factor config, own `/health`, `/ready`, `/metrics`. The two persistence services additionally carry their own table's migrations and apply them on startup before consuming; `historical-query-svc` applies none and declares the `schema_version` it binds to.
 - **feed-adapter-dukascopy (Phase 2, not built yet)**: Java, own Dockerfile (JRE base image + built JAR), own config (JForex credentials, symbol map) via secret/config, not baked into the image. Needs its own build pipeline (Maven/Gradle), separate from the Python services' — set this up as a distinct CI job only once Phase 2 actually starts, so it isn't sitting idle in CI today.
 - **Now (single host)**: Docker Compose — six Python services + `redis` + `postgres` (TimescaleDB image), optionally `edge-gateway`, plus `prometheus` and `grafana`. No Java in Compose yet.
 - **Next: minikube (local Kubernetes)**. Since minikube is single-node, most services run as 1-replica Deployments to start — this is a good exercise for writing real K8s manifests (Deployment + ClusterIP Service + ConfigMap/Secret per service) without yet needing multi-node concerns like `streaming-gateway-svc` sticky routing. Prometheus and Grafana map to their own lightweight Helm charts (`prometheus-community/prometheus`, `grafana/grafana`) rather than the full `kube-prometheus-stack` bundle, keeping only what's actually deployed.

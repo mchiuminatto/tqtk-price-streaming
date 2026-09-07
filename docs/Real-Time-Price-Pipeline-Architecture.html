@@ -123,15 +123,15 @@
       <tr><td><strong>feed-adapter-synthetic</strong></td><td>Generate configurable-rate synthetic ticks; tag <code>provider="synthetic"</code></td><td>None</td><td><code>ticks.raw.synthetic.{symbol}</code></td><td>Internal generator</td><td>One instance</td></tr>
       <tr><td><strong>feed-adapter-dukascopy</strong> <em>(Phase 2 — planned, not built)</em></td><td>Connect to Dukascopy (JForex, Java); tag <code>provider="dukascopy"</code>; publish raw ticks only</td><td>None</td><td><code>ticks.raw.dukascopy.{symbol}</code></td><td>Dukascopy feed (external)</td><td>One instance</td></tr>
       <tr><td><strong>aggregation-svc</strong></td><td>Discover &amp; consume raw ticks across all <em>active</em> providers; maintain live bar state per (provider,symbol,tf); checkpoint</td><td>None persistent</td><td><code>bars.{tf}.{provider}.{symbol}</code>; checkpoint key</td><td><code>ticks.raw.*</code> (active providers)</td><td>Single shared instance to start; shardable later</td></tr>
-      <tr><td><strong>tick-persistence-svc</strong></td><td>Discover &amp; consume raw ticks across all providers, batch-write durably</td><td><code>ticks</code> table (sole writer)</td><td>—</td><td><code>ticks.raw.*</code></td><td>Horizontal via consumer groups</td></tr>
-      <tr><td><strong>bar-persistence-svc</strong></td><td>Discover &amp; consume closed bars across all providers, batch-write durably</td><td><code>bars</code> table (sole writer)</td><td>—</td><td><code>bars.*.*</code>, closed only</td><td>Horizontal via consumer groups</td></tr>
+      <tr><td><strong>tick-persistence-svc</strong></td><td>Discover &amp; consume raw ticks across all providers, batch-write durably</td><td><code>ticks</code> table — sole writer of rows <em>and</em> DDL/migrations</td><td>—</td><td><code>ticks.raw.*</code></td><td>Horizontal via consumer groups</td></tr>
+      <tr><td><strong>bar-persistence-svc</strong></td><td>Discover &amp; consume closed bars across all providers, batch-write durably</td><td><code>bars</code> table — sole writer of rows <em>and</em> DDL/migrations</td><td>—</td><td><code>bars.*.*</code>, closed only</td><td>Horizontal via consumer groups</td></tr>
       <tr><td><strong>streaming-gateway-svc</strong></td><td>Relay live ticks/bars to LAN consumers over WebSocket, filterable by provider</td><td>None</td><td>WS API</td><td>Redis streams (all providers)</td><td>Horizontal; sticky routing beyond 1 instance (not yet)</td></tr>
-      <tr><td><strong>historical-query-svc</strong></td><td>Stateless REST for historical queries/backfill, filterable by provider</td><td>None (reads ticks/bars)</td><td>REST API</td><td>PostgreSQL (read-only)</td><td>Horizontal, stateless</td></tr>
+      <tr><td><strong>historical-query-svc</strong></td><td>Stateless REST for historical queries/backfill, filterable by provider</td><td>None — declared read-side consumer bound to a storage <code>schema_version</code></td><td>REST API</td><td>PostgreSQL (read-only)</td><td>Horizontal, stateless</td></tr>
       <tr><td><strong>edge-gateway</strong> <em>(not in scope — deferred with decision #9)</em></td><td>Would be a single LAN-facing entrypoint (TLS, routing, rate limiting) if the trust boundary ever changes; not built now</td><td>None</td><td>HTTPS / WSS</td><td>streaming-gateway-svc, historical-query-svc</td><td>Horizontal, stateless</td></tr>
     </tbody>
   </table>
   </div>
-  <p style="font-size:0.85rem;color:var(--muted);">Platform components: Redis (bus + checkpoint store), PostgreSQL + TimescaleDB (system of record).</p>
+  <p style="font-size:0.85rem;color:var(--muted);">Platform components: Redis (bus + checkpoint store), PostgreSQL + TimescaleDB (system of record — the server and extension only; the <code>ticks</code> and <code>bars</code> tables are created by their owning services' migrations, not by platform bootstrap).</p>
 
   <h2>Service topology</h2>
   <div class="diagram-card">
@@ -250,7 +250,7 @@
       <rect x="250" y="758" width="340" height="90" rx="8" fill="#eef4fc" stroke="#3b6fa0" stroke-width="1.5"/>
       <text x="420" y="782" text-anchor="middle" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="12" font-weight="700" fill="#1a2233">historical-query-svc</text>
       <text x="420" y="800" text-anchor="middle" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="9.5" fill="#5b6579">stateless REST — filter by provider</text>
-      <text x="420" y="816" text-anchor="middle" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="9.5" fill="#5b6579">reads ticks/bars (documented exception)</text>
+      <text x="420" y="816" text-anchor="middle" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="9.5" fill="#5b6579">reads ticks/bars @ declared schema_version</text>
 
       <path d="M420,848 L420,873 L460,873 L460,888" fill="none" stroke="#4a5568" stroke-width="1.5" marker-end="url(#arrow)"/>
 
@@ -273,7 +273,7 @@
       <span><span class="swatch" style="background:#f5f0fc;border:1.5px solid #7c5cbf;"></span>platform / shared infra</span>
       <span><span class="swatch" style="background:#eafaf3;border:1.5px dashed #2f9e6c;"></span>edge (deferred, not built)</span>
       <span><span class="swatch" style="background:#eef0f5;border:1.5px solid #6b7280;"></span>external actor</span>
-      <span><span class="line-sample dashed"></span>off-path / documented exception</span>
+      <span><span class="line-sample dashed"></span>off-path (read-side, versioned contract)</span>
     </div>
   </div>
 
@@ -294,6 +294,17 @@ Bar:   { provider, symbol, timeframe, bar_start_ts, open, high, low, close,
          tick_count, is_closed, last_update_ts }</pre>
   <p>Redis streams: <code>ticks.raw.{provider}.{symbol}</code>, <code>bars.{timeframe}.{provider}.{symbol}</code>. Postgres/TimescaleDB: <code>ticks</code> hypertable indexed on <code>(provider, symbol, ts)</code>; <code>bars</code> hypertable indexed on <code>(provider, symbol, timeframe, bar_start_ts)</code>.</p>
   <p><code>seq</code> is <code>uint64</code>, monotonic and gapless <strong>per <code>(provider, symbol)</code></strong>, and <strong>resets to 0 on every feed-adapter (re)start</strong>. <code>session_id</code> identifies one adapter session for that stream, so consumers do gap detection on <code>(session_id, seq)</code> — a <code>seq</code> jump within a session is real tick loss; a <code>session_id</code> change is an expected restart, not loss. Dedup/reconciliation keys on <code>(provider, symbol, session_id, seq)</code>. See <em>Architecture-Open-Questions.md</em> §#4.</p>
+
+  <h3>Two contract surfaces, both versioned</h3>
+  <p>The <code>Tick</code>/<code>Bar</code> records above are the <strong>wire contract</strong> — defined language-neutrally (JSON Schema or <code>.proto</code>) so a future Java adapter conforms without importing the Python package. The <code>ticks</code>/<code>bars</code> table schema is a <strong>second contract surface</strong>, and gets the same treatment rather than being left as whatever DDL happens to have been applied:</p>
+  <ul>
+    <li><strong>Versioned artifact.</strong> The table schema carries an explicit <code>schema_version</code> and lives beside the wire schema, not only in the database.</li>
+    <li><strong>DDL ownership follows sole-writer ownership.</strong> <code>tick-persistence-svc</code> owns the <code>ticks</code> schema; <code>bar-persistence-svc</code> owns <code>bars</code>. Each applies its own migrations on startup, under a Postgres advisory lock so concurrent instances migrate exactly once. Nothing is created by platform bootstrap or by an out-of-band manual step.</li>
+    <li><strong>Additive-only evolution.</strong> Within a released version lineage: no <code>DROP</code>, no <code>RENAME</code>, no type-narrowing; new columns are nullable or defaulted. Enforced by a CI check, not by review discipline.</li>
+    <li><strong>Declared read-side consumers.</strong> <code>historical-query-svc</code> reads tables it does not own — a CQRS read model, which is a legitimate pattern. It binds to a named <code>schema_version</code> and fails its readiness check rather than serving queries against an unrecognized schema.</li>
+    <li><strong>Contract tests on both sides.</strong> The writer asserts it produces the contracted schema; the reader asserts every column and type its queries touch is present in the version it declares. Both run against a shared fixture built from the contract artifact, so the reader's test needs no running persistence service.</li>
+  </ul>
+  <p><strong>Why this matters:</strong> without it, a column rename in <code>tick-persistence-svc</code> silently breaks <code>historical-query-svc</code> at runtime, with no test to catch it and no safe deploy order between them — the shared-database coupling that would otherwise disqualify <code>historical-query-svc</code> as an independently deployable service. <strong>The alternative rejected</strong> was having the persistence services serve historical queries themselves: it puts read load on the write path this design works to keep clear, and adds a hop to every historical query for no isolation the versioned contract doesn't already give.</p>
 
   <h2>Latency budget (internal, critical path — unchanged by provider count)</h2>
   <table>
@@ -404,7 +415,7 @@ Bar:   { provider, symbol, timeframe, bar_start_ts, open, high, low, close,
   <h2>Deployment model</h2>
   <ul>
     <li><strong>feed-adapter-synthetic</strong>: Python, own Dockerfile, configurable tick-rate and symbol set via env/config.</li>
-    <li><strong>aggregation-svc, tick-persistence-svc, bar-persistence-svc, streaming-gateway-svc, historical-query-svc</strong>: Python, own Dockerfile each, own 12-factor config, own <code>/health</code>, <code>/ready</code>, <code>/metrics</code>.</li>
+    <li><strong>aggregation-svc, tick-persistence-svc, bar-persistence-svc, streaming-gateway-svc, historical-query-svc</strong>: Python, own Dockerfile each, own 12-factor config, own <code>/health</code>, <code>/ready</code>, <code>/metrics</code>. The two persistence services additionally carry their own table's migrations and apply them on startup before consuming; <code>historical-query-svc</code> applies none and declares the <code>schema_version</code> it binds to.</li>
     <li><strong>feed-adapter-dukascopy (Phase 2, not built yet)</strong>: Java, own Dockerfile (JRE base image + built JAR), config (JForex credentials, symbol map) via secret/config. Needs its own build pipeline (Maven/Gradle) — set up as a distinct CI job only once Phase 2 starts.</li>
     <li><strong>Now (single host)</strong>: Docker Compose — six Python services + redis + postgres (TimescaleDB image), optional edge-gateway, plus <code>prometheus</code> and <code>grafana</code>. No Java in Compose yet.</li>
     <li><strong>Next: minikube (local Kubernetes)</strong>. Single-node, so most services run as 1-replica Deployments to start — a good exercise for real K8s manifests (Deployment + ClusterIP Service + ConfigMap/Secret per service) without yet needing multi-node concerns like streaming-gateway-svc sticky routing. Prometheus and Grafana map to their own lightweight Helm charts (<code>prometheus-community/prometheus</code>, <code>grafana/grafana</code>) rather than the full <code>kube-prometheus-stack</code> bundle, keeping only what's actually deployed.</li>

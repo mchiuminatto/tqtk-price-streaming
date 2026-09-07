@@ -26,15 +26,21 @@ plan.
   grace-delayed bar close via a wheel timer that posts close events into the in-process mailbox;
   gapless series (idle bars carry forward); crash recovery via per-actor checkpoint (O/H/L/C +
   last-consumed stream ID), checkpointed on every bar close and every ~1 s.
+- **Versioned storage contract**: the `ticks`/`bars` table schema promoted from implicit shared
+  surface to an explicit versioned artifact (`schema_version`) alongside the wire contract — DDL
+  ownership follows sole-writer ownership, evolution is additive-only (CI-enforced), and both the
+  writing and reading sides carry contract tests against a shared fixture.
 - **tick-persistence-svc / bar-persistence-svc**: batch-write to TimescaleDB hypertables; sole
-  writers of their tables; bar-persistence idempotent (upsert on
-  `(provider, symbol, timeframe, bar_start_ts)`).
+  writers of their tables *and* owners of their DDL, applying their own migrations on startup;
+  bar-persistence idempotent (upsert on `(provider, symbol, timeframe, bar_start_ts)`).
 - **streaming-gateway-svc**: WebSocket relay of live ticks and bar updates to LAN consumers,
   filterable by provider/symbol/timeframe; slow-consumer policy (conflate latest per key, then
   drop); one-shot bootstrap snapshot endpoint (`N-1` closed bars from historical-query + the 1
   forming bar held in memory, stitched server-side, reconciled on
   `(provider, symbol, timeframe, bar_start_ts)`).
-- **historical-query-svc**: stateless REST over the `ticks` and `bars` tables (read-only).
+- **historical-query-svc**: stateless REST over the `ticks` and `bars` tables (read-only), as a
+  declared read-side consumer bound to a named storage `schema_version` — a CQRS read model with
+  the coupling made explicit rather than implicit.
 - **bus-retention janitor**: consumer-position-driven `XTRIM` + hard-cap backstop (N ~ a few hours
   of volume, Critical alert) + dead-consumer eviction.
 - **Platform resilience**: Redis with both AOF (`everysec`) and RDB; documented recovery-time
@@ -60,21 +66,27 @@ All prior open design questions are now settled (see `docs/Architecture-Open-Que
   `uint64` monotonic and gapless per `(provider, symbol)`, resets to 0 each adapter session, and is
   paired with a per-session `session_id`; consumers do gap detection on `(session_id, seq)` and key
   dedup/reconciliation on `(provider, symbol, session_id, seq)`. The one authority both
-  `tqtk-common` (Python) and the future Java adapter implement.
+  `tqtk-common` (Python) and the future Java adapter implement. Also defines the pipeline's second
+  contract surface — the versioned `ticks`/`bars` storage schema: DDL ownership following
+  sole-writer ownership, additive-only evolution, declared read-side consumers, and contract tests
+  on both sides.
 - `synthetic-feed`: configurable-rate synthetic tick generation, symbol set, provider tagging,
   `recv_ts`/`seq`/`session_id` stamping (new `session_id` and `seq` reset to 0 per process start),
   raw-tick publication.
 - `bar-aggregation`: actor model and keying, per-tick intrabar updates across all 8 timeframes,
   `recv_ts` bucketing, grace-delayed time-driven bar close, idle-bar carry-forward, `Open`
   semantics, checkpoint and crash recovery.
-- `tick-persistence`: durable batch persistence of raw ticks, sole-writer ownership, consumer-group
-  scaling, buffering behavior during a database outage.
-- `bar-persistence`: durable batch persistence of closed bars, idempotent upsert keyed on
+- `tick-persistence`: durable batch persistence of raw ticks, sole-writer ownership of both rows and
+  the `ticks` DDL (migrations applied on startup), consumer-group scaling, buffering behavior during
+  a database outage.
+- `bar-persistence`: durable batch persistence of closed bars, sole-writer ownership of both rows
+  and the `bars` DDL (migrations applied on startup), idempotent upsert keyed on
   `(provider, symbol, timeframe, bar_start_ts)`, buffering during a database outage.
 - `streaming-gateway`: WebSocket relay to LAN consumers, subscription filtering, slow-consumer
   policy, LAN-interface binding, plus a one-shot bootstrap snapshot endpoint that stitches the
   `N-1` most recent closed bars with the 1 forming bar (closed tail sourced from `historical-query`).
-- `historical-query`: stateless REST read API over `ticks`/`bars`, filterable by provider.
+- `historical-query`: stateless REST read API over `ticks`/`bars`, filterable by provider, as a
+  declared read-side consumer bound to a storage `schema_version`.
 - `bus-retention`: consumer-position-driven stream trimming, hard-cap backstop with alerting,
   dead-consumer eviction.
 - `platform-resilience`: Redis durability configuration, recovery-time objectives, per-component
@@ -92,10 +104,14 @@ None — greenfield project, no existing specs.
 
 - **New code**: entire `libs/tqtk-common` package and all six `services/*` services; `deploy/`
   Docker Compose and minikube manifests.
-- **New infrastructure**: Redis (bus + checkpoint store, AOF+RDB), PostgreSQL + TimescaleDB,
-  Prometheus, Grafana.
+- **New infrastructure**: Redis (bus + checkpoint store, AOF+RDB), PostgreSQL + TimescaleDB
+  (server and extension only — application tables are created by their owning services' migrations,
+  not by platform bootstrap), Prometheus, Grafana.
 - **Dependencies**: Python 3.x, a uv workspace, `redis-py`, an async web framework for
   health/metrics endpoints, `prometheus_client`, a Postgres driver, TimescaleDB extension.
 - **APIs introduced**: WebSocket relay (streaming-gateway), REST (historical-query), Prometheus
   `/metrics` on every service.
+- **New CI enforcement**: a check rejecting destructive migrations (`DROP`/`RENAME`/type-narrowing)
+  against `ticks` or `bars` within a released `schema_version` lineage, alongside the existing
+  per-service path filters.
 - **No external-facing auth** at this stage — LAN trust only.

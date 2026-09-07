@@ -13,6 +13,7 @@ Usage (changed paths on stdin, one per line, repo-relative):
 
 Output is a JSON array of ``{"name", "path", "kind"}`` objects, sorted by name,
 suitable for a GitHub Actions matrix.
+
 """
 
 from __future__ import annotations

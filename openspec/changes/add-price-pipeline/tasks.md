@@ -3,7 +3,7 @@
 - [x] 1.1 Create the monorepo layout (`libs/tqtk-common`, `services/*` for all six services,
       `deploy/`) and a root workspace config (e.g. `uv` workspace `pyproject.toml`); verify the
       workspace resolves (`uv sync` or equivalent succeeds).
-- [ ] 1.2 Add a per-service Dockerfile skeleton (multi-stage, `tqtk-common` installed as a
+- [x] 1.2 Add a per-service Dockerfile skeleton (multi-stage, `tqtk-common` installed as a
       dependency or built wheel) for all six services; verify each builds independently.
 - [ ] 1.3 Configure CI with per-service path filters; verify a change scoped to one service's
       directory triggers only that service's build/test job.

@@ -122,8 +122,11 @@ jobs:
           MEMBER_NAME: ${{ matrix.member.name }}
         run: |
           set -uo pipefail
-          uv run --frozen --package "$MEMBER_NAME" --group dev pytest "$MEMBER_PATH" -q
-          code=$?
+          # `|| code=$?` rather than a bare call: the default shell is
+          # `bash -eo pipefail`, so errexit would abort the step before the
+          # exit-5 check below ever ran.
+          code=0
+          uv run --frozen --package "$MEMBER_NAME" --group dev pytest "$MEMBER_PATH" -q || code=$?
           # pytest exits 5 when it collects nothing. The services are still
           # being scaffolded, so an empty suite is not yet a failure.
           if [ "$code" -eq 5 ]; then

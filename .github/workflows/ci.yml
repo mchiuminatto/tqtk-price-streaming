@@ -111,8 +111,10 @@ jobs:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
 
+      # `--group dev` pulls pytest (declared once in the root pyproject) into
+      # the member's environment; without it `uv run pytest` has nothing to spawn.
       - name: Sync
-        run: uv sync --frozen --package "${{ matrix.member.name }}"
+        run: uv sync --frozen --package "${{ matrix.member.name }}" --group dev
 
       - name: Test
         env:
@@ -120,7 +122,7 @@ jobs:
           MEMBER_NAME: ${{ matrix.member.name }}
         run: |
           set -uo pipefail
-          uv run --frozen --package "$MEMBER_NAME" pytest "$MEMBER_PATH" -q
+          uv run --frozen --package "$MEMBER_NAME" --group dev pytest "$MEMBER_PATH" -q
           code=$?
           # pytest exits 5 when it collects nothing. The services are still
           # being scaffolded, so an empty suite is not yet a failure.

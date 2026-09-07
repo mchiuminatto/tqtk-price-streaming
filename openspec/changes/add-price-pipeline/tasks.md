@@ -1,6 +1,6 @@
 ## 1. Monorepo & shared library scaffolding
 
-- [ ] 1.1 Create the monorepo layout (`libs/tqtk-common`, `services/*` for all six services,
+- [x] 1.1 Create the monorepo layout (`libs/tqtk-common`, `services/*` for all six services,
       `deploy/`) and a root workspace config (e.g. `uv` workspace `pyproject.toml`); verify the
       workspace resolves (`uv sync` or equivalent succeeds).
 - [ ] 1.2 Add a per-service Dockerfile skeleton (multi-stage, `tqtk-common` installed as a

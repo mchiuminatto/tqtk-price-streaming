@@ -135,6 +135,12 @@ jobs:
           fi
           exit "$code"
 
+      # `cache-to: type=gha` below needs the docker-container driver; the
+      # runner's default `docker` driver cannot export a build cache at all.
+      - name: Set up Buildx
+        if: matrix.member.kind == 'service'
+        uses: docker/setup-buildx-action@v3
+
       # Only a service owns a Dockerfile; tqtk-common ships as a wheel inside
       # the service images. The build context is the repo root — see the
       # header comment in any services/*/Dockerfile.

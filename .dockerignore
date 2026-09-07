@@ -1,0 +1,40 @@
+# The Docker build context for every service image is the REPOSITORY ROOT
+# (`docker build -f services/<svc>/Dockerfile .`), because this is a uv
+# workspace and a service resolves `tqtk-common` through the root
+# pyproject.toml and the shared uv.lock. Keep that context small.
+
+# Version control and editor/tooling state
+.git/
+.github/
+.gitignore
+.idea/
+.claude/
+
+# Local virtualenvs — never copy a host venv into an image
+.venv/
+**/.venv/
+
+# Sample tick data (~53MB) — mounted or loaded at run time, never baked in
+data/
+
+# Planning artifacts, documentation, deployment assets, CI tooling
+docs/
+openspec/
+deploy/
+tools/
+
+# Python build and test caches
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.ruff_cache/
+**/*.egg-info/
+**/build/
+**/dist/
+
+# Tests are not part of a runtime image (images are synced with --no-dev)
+**/tests/
+
+# Dockerfiles are passed with -f and read outside the context
+**/Dockerfile
+.dockerignore

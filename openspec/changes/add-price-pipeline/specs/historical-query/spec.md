@@ -43,3 +43,29 @@ affinity or shared in-process state between instances.
 - **WHEN** requests are distributed across multiple running instances
 - **THEN** any instance returns the same result for the same query, independent of which prior
   requests it has served
+
+### Requirement: Declared read-side consumer of the storage contract
+The service SHALL declare the `ticks` and `bars` `schema_version` it binds to, per the
+`data-contract` capability's declared-read-side-consumer rule. It SHALL NOT own, create, or alter
+either table's schema, and it SHALL NOT depend on schema details absent from its declared version.
+
+#### Scenario: The service starts
+- **WHEN** the historical-query service starts
+- **THEN** the `schema_version` it binds to for `ticks` and `bars` is declared and observable, and
+  no migration is applied by this service
+
+#### Scenario: The declared version is unavailable
+- **WHEN** the database the service connects to is not at, or has not reached, its declared
+  `schema_version`
+- **THEN** the service fails its readiness check rather than serving queries against an
+  unrecognized schema
+
+#### Scenario: The writing services add a column
+- **WHEN** a persistence service applies an additive migration introducing a new column
+- **THEN** the historical-query service continues serving its existing queries unchanged, with no
+  coordinated redeploy required
+
+#### Scenario: Contract conformance is verified
+- **WHEN** the service's read-side contract test runs
+- **THEN** it asserts every column and type its queries depend on is present in its declared
+  `schema_version`, using the shared fixture and without a running persistence service

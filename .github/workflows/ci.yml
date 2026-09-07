@@ -1,0 +1,177 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_VERSION: "0.12.10"
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  # Which workspace members does this diff actually touch? Everything below is
+  # matrixed over the answer, so an unrelated service does not rebuild on an
+  # unrelated change. The rules live in tools/ci/affected_members.py and are
+  # unit-tested by the repo job, not discovered by pushing commits.
+  detect:
+    name: Detect affected members
+    runs-on: ubuntu-latest
+    outputs:
+      members: ${{ steps.affected.outputs.members }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history: the diff base may be far behind on a long-lived branch.
+          fetch-depth: 0
+
+      - name: Resolve the diff range
+        id: range
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            # Three-dot: what the branch changed relative to the merge base,
+            # not what has landed on the base branch in the meantime.
+            echo "range=${BASE_SHA}...HEAD" >> "$GITHUB_OUTPUT"
+          elif [ -n "${BEFORE_SHA:-}" ] \
+            && [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ] \
+            && git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
+            echo "range=${BEFORE_SHA} ${HEAD_SHA}" >> "$GITHUB_OUTPUT"
+          else
+            # First push of a branch, or a force-push that orphaned `before`:
+            # no usable base, so fall back to building everything.
+            echo "range=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Compute the affected-member matrix
+        id: affected
+        env:
+          RANGE: ${{ steps.range.outputs.range }}
+        run: |
+          set -euo pipefail
+          if [ -z "$RANGE" ]; then
+            echo "No usable diff base — treating every member as affected."
+            changed="pyproject.toml"
+          else
+            changed="$(git diff --name-only $RANGE)"
+          fi
+          echo "Changed files:"
+          echo "$changed" | sed 's/^/  /'
+          members="$(printf '%s\n' "$changed" | python3 tools/ci/affected_members.py)"
+          echo "Affected members: $members"
+          echo "members=$members" >> "$GITHUB_OUTPUT"
+
+  # Repo-wide checks: cheap, and they guard the path-filter rules themselves,
+  # so they run regardless of which members the diff touched.
+  repo:
+    name: Lint and CI tooling
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+
+      - name: Lint
+        run: uv run --frozen ruff check .
+
+      - name: Format check
+        run: uv run --frozen ruff format --check .
+
+      - name: Test the path-filter rules
+        run: uv run --frozen pytest tools/ci -q
+
+  # One build/test job per affected member. `fail-fast: false` so one service's
+  # failure does not mask another's.
+  member:
+    name: ${{ matrix.member.name }}
+    needs: detect
+    if: needs.detect.outputs.members != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        member: ${{ fromJSON(needs.detect.outputs.members) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+
+      # `--group dev` pulls pytest (declared once in the root pyproject) into
+      # the member's environment; without it `uv run pytest` has nothing to spawn.
+      - name: Sync
+        run: uv sync --frozen --package "${{ matrix.member.name }}" --group dev
+
+      - name: Test
+        env:
+          MEMBER_PATH: ${{ matrix.member.path }}
+          MEMBER_NAME: ${{ matrix.member.name }}
+        run: |
+          set -uo pipefail
+          # `|| code=$?` rather than a bare call: the default shell is
+          # `bash -eo pipefail`, so errexit would abort the step before the
+          # exit-5 check below ever ran.
+          code=0
+          uv run --frozen --package "$MEMBER_NAME" --group dev pytest "$MEMBER_PATH" -q || code=$?
+          # pytest exits 5 when it collects nothing. The services are still
+          # being scaffolded, so an empty suite is not yet a failure.
+          if [ "$code" -eq 5 ]; then
+            echo "::notice title=$MEMBER_NAME::no tests collected yet"
+            exit 0
+          fi
+          exit "$code"
+
+      # `cache-to: type=gha` below needs the docker-container driver; the
+      # runner's default `docker` driver cannot export a build cache at all.
+      - name: Set up Buildx
+        if: matrix.member.kind == 'service'
+        uses: docker/setup-buildx-action@v3
+
+      # Only a service owns a Dockerfile; tqtk-common ships as a wheel inside
+      # the service images. The build context is the repo root — see the
+      # header comment in any services/*/Dockerfile.
+      - name: Build image
+        if: matrix.member.kind == 'service'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.member.path }}/Dockerfile
+          tags: tqtk/${{ matrix.member.name }}:ci
+          push: false
+          cache-from: type=gha,scope=${{ matrix.member.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.member.name }}
+
+  # A single required status check: green whether or not any member matched,
+  # so a docs-only PR is mergeable without the matrix having run.
+  ci:
+    name: CI
+    if: always()
+    needs: [detect, repo, member]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check results
+        run: |
+          set -euo pipefail
+          echo "detect: ${{ needs.detect.result }}"
+          echo "repo:   ${{ needs.repo.result }}"
+          echo "member: ${{ needs.member.result }}"
+          [ "${{ needs.detect.result }}" = "success" ] || exit 1
+          [ "${{ needs.repo.result }}" = "success" ] || exit 1
+          case "${{ needs.member.result }}" in
+            success|skipped) ;;
+            *) exit 1 ;;
+          esac

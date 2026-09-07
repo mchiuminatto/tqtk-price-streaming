@@ -37,6 +37,24 @@ Java adapter conforms to the same contract without depending on `tqtk-common`. *
 rejected**: let the Python types be the de facto contract — works until Phase 2, then forces a
 retrofit onto a component that was never designed against a neutral spec.
 
+### Persisted schema is a versioned contract, not an implicit shared surface
+`historical-query-svc` reads the `ticks` and `bars` tables that `tick-persistence-svc` and
+`bar-persistence-svc` own — a CQRS read model, which is a legitimate pattern, but one that was
+coupling three services to a schema none of them declared. The schema is therefore promoted to the
+same treatment the wire contract already gets: a versioned artifact with an explicit
+`schema_version`, DDL ownership following sole-writer ownership (each persistence service applies
+its own migrations on startup, rather than platform bootstrap creating both tables), additive-only
+evolution, and contract tests on both the writing and reading sides against a shared fixture.
+That keeps the read model while making the coupling explicit and independently deployable — a
+column added by a writer can no longer silently break the reader, and the two need no coordinated
+release. **Alternative rejected**: have the persistence services serve historical queries
+themselves, removing the shared table entirely — it puts read load on the write path this design
+works to keep clear, and adds a network hop to every historical query for no isolation benefit the
+versioned contract doesn't already provide. **Alternative rejected**: leave the schema implicit and
+rely on review discipline — the rule that isn't enforced is the one that breaks during the first
+refactor under time pressure, which is why the additive-only rule gets a CI check rather than a
+paragraph.
+
 ### `feed-adapter-*` and `aggregation-svc` stay separate processes
 A combined single process would save ~1-2 ms of network-hop latency, comfortably possible today
 with only a Python provider active. **Rejected** because Dukascopy's eventual adapter is
@@ -166,6 +184,11 @@ outgrows the built-in engine (e.g. multiple notification channels with routing r
 - **The monorepo couples all six services' source history to one clone.** → Mitigation: each
   service still builds and deploys as an independent image; CI path-filtering keeps unrelated
   services from rebuilding on an unrelated change.
+- **Migrations applied on service startup can race when a persistence service scales to more than
+  one instance** (both consumer-group scaling requirements permit this). → Mitigation: migrations
+  run under a Postgres advisory lock, so exactly one instance migrates and the rest wait and then
+  proceed; the additive-only rule bounds the blast radius of a migration running while an older
+  instance is still serving.
 
 ## Migration Plan
 
@@ -174,15 +197,18 @@ Build order (each stage independently testable against its spec before the next 
 
 1. `libs/tqtk-common` — contract types, stream-name builders, consumer-group helpers,
    health/ready/metrics server, structured logging (`data-contract`, `service-runtime`).
-2. Platform components up via Docker Compose: Redis (AOF+RDB), PostgreSQL+TimescaleDB,
+2. Platform components up via Docker Compose: Redis (AOF+RDB), PostgreSQL+TimescaleDB
+   (server and extension only — no application tables; each persistence service creates its own),
    Prometheus, Grafana (`platform-resilience`).
 3. `feed-adapter-synthetic` (`synthetic-feed`) — verify raw ticks land on
    `ticks.raw.synthetic.{symbol}` for all 13 symbols.
 4. `aggregation-svc` (`bar-aggregation`) — actor model, router, wheel timer, checkpointing;
    verify `tick_to_bar_latency_ms` stays under budget.
-5. `tick-persistence-svc` / `bar-persistence-svc` — verify sole-writer ownership and
+5. `tick-persistence-svc` / `bar-persistence-svc` — each applies its own table's migrations on
+   startup; verify sole-writer ownership (of rows and of DDL), storage-contract conformance, and
    `bar-persistence`'s idempotent upsert under a simulated duplicate delivery.
-6. `streaming-gateway-svc` (relay + snapshot) and `historical-query-svc`.
+6. `streaming-gateway-svc` (relay + snapshot) and `historical-query-svc` — the latter binding to
+   a declared storage `schema_version`, with its read-side contract test green.
 7. Bus-retention janitor — verify trim behavior under a simulated slow/dead consumer.
 8. Observability wired last, once the services it measures exist: metrics, dashboards, alert
    rules.

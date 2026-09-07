@@ -1,11 +1,11 @@
 ## 1. Monorepo & shared library scaffolding
 
-- [ ] 1.1 Create the monorepo layout (`libs/tqtk-common`, `services/*` for all six services,
+- [x] 1.1 Create the monorepo layout (`libs/tqtk-common`, `services/*` for all six services,
       `deploy/`) and a root workspace config (e.g. `uv` workspace `pyproject.toml`); verify the
       workspace resolves (`uv sync` or equivalent succeeds).
-- [ ] 1.2 Add a per-service Dockerfile skeleton (multi-stage, `tqtk-common` installed as a
+- [x] 1.2 Add a per-service Dockerfile skeleton (multi-stage, `tqtk-common` installed as a
       dependency or built wheel) for all six services; verify each builds independently.
-- [ ] 1.3 Configure CI with per-service path filters; verify a change scoped to one service's
+- [x] 1.3 Configure CI with per-service path filters; verify a change scoped to one service's
       directory triggers only that service's build/test job.
 
 ## 2. Data contract (`data-contract` spec)
@@ -24,6 +24,17 @@
 - [ ] 2.5 Implement the consumer-side gap-detection/dedup helper keyed on
       `(provider, symbol, session_id, seq)` in `tqtk-common`; verify unit tests cover: an in-session
       gap (flagged), a session change (not flagged as loss), and a duplicate delivery (deduped).
+- [ ] 2.6 Write the versioned storage schema contract artifact for the `ticks` and `bars` tables
+      (columns, types, indexes, `schema_version`), alongside the wire schema from task 2.1; verify
+      a fixture database built from it matches the data model's documented indexes
+      (`(provider, symbol, ts)` and `(provider, symbol, timeframe, bar_start_ts)`).
+- [ ] 2.7 Implement the shared storage-contract test fixture in `tqtk-common` — builds a schema at a
+      given `schema_version` from the contract artifact, for use by both writer and reader contract
+      tests; verify it produces a schema a plain `SELECT` of every contracted column succeeds
+      against.
+- [ ] 2.8 Add a CI check that fails on a destructive migration against `ticks` or `bars` (`DROP`
+      COLUMN, `RENAME`, or type-narrowing) within a released `schema_version` lineage; verify it
+      passes on an added nullable column and fails on a dropped one.
 
 ## 3. Service runtime contract (`service-runtime` spec)
 
@@ -43,9 +54,10 @@
 
 - [ ] 4.1 Add Redis to Docker Compose with AOF (`everysec`) and RDB both enabled; verify
       `redis-cli CONFIG GET appendonly` and `CONFIG GET save` reflect both enabled after startup.
-- [ ] 4.2 Add PostgreSQL + TimescaleDB to Docker Compose with `ticks` and `bars` hypertables,
-      indexed per the data model (`(provider, symbol, ts)` and
-      `(provider, symbol, timeframe, bar_start_ts)`); verify the indexes exist via `\d+`.
+- [ ] 4.2 Add PostgreSQL + TimescaleDB to Docker Compose — server and `timescaledb` extension
+      only, with no application tables (each persistence service creates its own on startup, per
+      tasks 7.1 and 8.1); verify the extension is available via `\dx` and that `ticks`/`bars` do not
+      exist before any service has started.
 - [ ] 4.3 Add Prometheus to Docker Compose, configured to scrape every service's `/metrics`;
       verify the Prometheus targets page shows all services as up once running.
 - [ ] 4.4 Add Grafana to Docker Compose wired to the Prometheus datasource; verify the Grafana UI
@@ -96,23 +108,37 @@
 
 ## 7. tick-persistence-svc (`tick-persistence` spec)
 
-- [ ] 7.1 Implement consumer-group-based batch consumption of `ticks.raw.*` across all providers,
+- [ ] 7.1 Implement ownership of the `ticks` table schema: migrations living with this service,
+      applied on startup under a Postgres advisory lock before consuming, declaring the
+      `schema_version` produced; verify a start against an empty database creates the table and its
+      indexes, a start against an up-to-date database applies nothing, and two instances starting
+      concurrently migrate exactly once.
+- [ ] 7.2 Verify the writer-side storage contract test: the schema the migrations produce matches
+      the declared `schema_version` in the contract artifact (task 2.6), using the shared fixture.
+- [ ] 7.3 Implement consumer-group-based batch consumption of `ticks.raw.*` across all providers,
       writing to the `ticks` table as sole writer; verify a published tick appears as a row with
       `provider`/`symbol`/timestamps intact.
-- [ ] 7.2 Verify horizontal scaling: run two instances against the same streams and confirm each
+- [ ] 7.4 Verify horizontal scaling: run two instances against the same streams and confirm each
       tick is persisted exactly once (no duplicate or missing rows).
-- [ ] 7.3 Verify outage buffering: stop Postgres, publish ticks, restart Postgres, and confirm
+- [ ] 7.5 Verify outage buffering: stop Postgres, publish ticks, restart Postgres, and confirm
       every tick published during the outage is eventually persisted.
 
 ## 8. bar-persistence-svc (`bar-persistence` spec)
 
-- [ ] 8.1 Implement consumer-group-based batch consumption of `bars.*.*` filtered to
+- [ ] 8.1 Implement ownership of the `bars` table schema: migrations living with this service,
+      applied on startup under a Postgres advisory lock before consuming, declaring the
+      `schema_version` produced; verify a start against an empty database creates the table and its
+      indexes, a start against an up-to-date database applies nothing, and two instances starting
+      concurrently migrate exactly once.
+- [ ] 8.2 Verify the writer-side storage contract test: the schema the migrations produce matches
+      the declared `schema_version` in the contract artifact (task 2.6), using the shared fixture.
+- [ ] 8.3 Implement consumer-group-based batch consumption of `bars.*.*` filtered to
       `is_closed=true`, writing to the `bars` table as sole writer; verify an intrabar update
       never produces a row.
-- [ ] 8.2 Implement idempotent upsert keyed on `(provider, symbol, timeframe, bar_start_ts)`;
+- [ ] 8.4 Implement idempotent upsert keyed on `(provider, symbol, timeframe, bar_start_ts)`;
       verify replaying the same closed bar twice results in exactly one row with an unchanged
       `tick_count`, not a duplicate.
-- [ ] 8.3 Verify outage buffering for closed bars, matching task 7.3's pattern.
+- [ ] 8.5 Verify outage buffering for closed bars, matching task 7.5's pattern.
 
 ## 9. streaming-gateway-svc (`streaming-gateway` spec)
 
@@ -139,6 +165,15 @@
 - [ ] 10.2 Verify bar endpoints return only `is_closed=true` rows.
 - [ ] 10.3 Verify stateless scaling: run two instances behind a load balancer and confirm
       identical responses to the same query regardless of which instance served a prior request.
+- [ ] 10.4 Declare the `ticks`/`bars` `schema_version` this service binds to as observable config,
+      and apply no migrations from this service; verify startup against a database below the
+      declared version fails `/ready` rather than serving queries.
+- [ ] 10.5 Verify the read-side storage contract test: every column and type the service's queries
+      depend on is present in its declared `schema_version`, run against the shared fixture (task
+      2.7) with no persistence service running.
+- [ ] 10.6 Verify additive-migration tolerance: apply a migration adding a nullable column to
+      `ticks`/`bars` and confirm the service continues serving its existing queries with no
+      redeploy.
 
 ## 11. bus-retention janitor (`bus-retention` spec)
 

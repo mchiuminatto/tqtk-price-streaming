@@ -1,0 +1,33 @@
+[project]
+name = "tqtk-price-streaming"
+version = "0.1.0"
+description = "Real-time price pipeline: tick ingestion, OHLCV bar aggregation, persistence, and LAN streaming."
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["libs/*", "services/*"]
+
+# Workspace-internal dependencies resolve to the local source tree, not PyPI.
+# Members inherit these sources from the workspace root.
+[tool.uv.sources]
+tqtk-common = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.pytest.ini_options]
+testpaths = ["libs", "services", "tools"]
+# `tools` is not an installed package, so the repo root has to be importable
+# for `from tools.ci.affected_members import ...` to resolve.
+pythonpath = ["."]

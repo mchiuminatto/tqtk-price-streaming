@@ -19,6 +19,7 @@ tqtk-common = { workspace = true }
 [dependency-groups]
 dev = [
     "jsonschema>=4.23",
+    "psycopg[binary]>=3.2",
     "pytest>=8.0",
     "ruff>=0.6",
 ]
@@ -34,6 +35,9 @@ known-first-party = ["tqtk_common"]
 
 [tool.pytest.ini_options]
 testpaths = ["contracts", "libs", "services", "tools"]
+# Tests needing a real database, which start a container and skip without one. Deselect with
+# `-m "not integration"`; CI runs them once task 4.2 brings the Compose stack.
+markers = ["integration: requires a running PostgreSQL/TimescaleDB"]
 # `tools` is not an installed package, so the repo root has to be importable
 # for `from tools.ci.affected_members import ...` to resolve.
 pythonpath = ["."]

@@ -122,7 +122,7 @@ Bar:   { provider, symbol, side, timeframe, bar_start_ts, open, high, low, close
          tick_count, is_closed, last_update_ts }        side = "bid" | "ask"
 ```
 
-Redis streams: `ticks.raw.{provider}.{symbol}`, `bars.{timeframe}.{provider}.{symbol}`. Postgres/TimescaleDB: `ticks` hypertable indexed on `(provider, symbol, ts)`; `bars` hypertable indexed on `(provider, symbol, side, timeframe, bar_start_ts)`, prices as typed `double precision` columns.
+Redis streams: `ticks.raw.{provider}.{symbol}`, `bars.{timeframe}.{provider}.{symbol}`. Postgres/TimescaleDB: `ticks` hypertable indexed on `(provider, symbol, recv_ts)`, partitioned on `recv_ts`; `bars` hypertable indexed on `(provider, symbol, side, timeframe, bar_start_ts)`, prices as typed `double precision` columns.
 
 **The bid/ask side dimension.** A bar is a bid series or an ask series — there is no single "the price" for an FX window — so every window produces **two** records, `side = "bid"` and `side = "ask"`, built from that side's price on each contributing tick, with identical `tick_count`. `side` is a field of the record, deliberately **not** a segment of the stream name: bar streams carry both sides (stream count stays 104, and the trim policy and checkpoint keys are untouched), while the aggregation actor stays keyed `(provider, symbol, timeframe)` and holds both side-bars, publishing the pair in one atomic bus operation. There is no `mid` side — consumers derive it. The split doubles LAN bar-message volume to **~6,240 msgs/sec** and persisted bar rows to **~27/sec (~2.3M/day)**; ticks are unaffected, since a `Tick` already carried both sides.
 

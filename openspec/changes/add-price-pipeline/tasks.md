@@ -29,7 +29,7 @@
       (columns, types, indexes, `schema_version`), alongside the wire schema from task 2.1, with
       `bars` carrying `side` as a typed column and prices as `double precision` (no JSONB); verify
       a fixture database built from it matches the data model's documented indexes
-      (`(provider, symbol, ts)` and `(provider, symbol, side, timeframe, bar_start_ts)`).
+      (`(provider, symbol, recv_ts)` and `(provider, symbol, side, timeframe, bar_start_ts)`).
 - [ ] 2.7 Implement the shared storage-contract test fixture in `tqtk-common` — builds a schema at a
       given `schema_version` from the contract artifact, for use by both writer and reader contract
       tests; verify it produces a schema a plain `SELECT` of every contracted column succeeds

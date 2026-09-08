@@ -1,0 +1,68 @@
+{
+  "$schema": "./storage-contract.schema.json",
+  "table": "ticks",
+  "schema_version": 1,
+  "owner": "tick-persistence-svc",
+  "description": "Raw ticks as persisted, one row per delivered Tick record. Written only by its owning service, which also owns this table's DDL and migrations; read by historical-query-svc as a declared read-side consumer. Evolution within this version lineage is additive only.",
+  "hypertable": {
+    "time_column": "recv_ts",
+    "chunk_interval": "1 day",
+    "rationale": "recv_ts is the pipeline's event time and is monotonic per (provider, symbol), so chunks align with ingestion order. One day holds roughly 34M rows at the Phase-1 tick rate; the 7-day default would make a chunk large enough to hurt both compression and chunk exclusion."
+  },
+  "columns": [
+    {
+      "name": "provider",
+      "type": "text",
+      "nullable": false,
+      "wire_field": "provider",
+      "description": "Low-cardinality; a natural dictionary-compression segment."
+    },
+    { "name": "symbol", "type": "text", "nullable": false, "wire_field": "symbol" },
+    {
+      "name": "provider_symbol",
+      "type": "text",
+      "nullable": true,
+      "wire_field": "provider_symbol",
+      "description": "Optional on the wire, so nullable here."
+    },
+    {
+      "name": "provider_ts",
+      "type": "timestamptz",
+      "nullable": false,
+      "wire_field": "provider_ts",
+      "description": "The wire carries integer microseconds since the Unix epoch; timestamptz has exactly that resolution, so the conversion is lossless in both directions."
+    },
+    {
+      "name": "recv_ts",
+      "type": "timestamptz",
+      "nullable": false,
+      "wire_field": "recv_ts",
+      "description": "The hypertable's time dimension. Named recv_ts rather than ts because a Tick carries two timestamps and neither may be the implicit one."
+    },
+    { "name": "bid", "type": "double precision", "nullable": false, "wire_field": "bid" },
+    { "name": "ask", "type": "double precision", "nullable": false, "wire_field": "ask" },
+    { "name": "bid_size", "type": "double precision", "nullable": true, "wire_field": "bid_size" },
+    { "name": "ask_size", "type": "double precision", "nullable": true, "wire_field": "ask_size" },
+    { "name": "session_id", "type": "text", "nullable": false, "wire_field": "session_id" },
+    {
+      "name": "seq",
+      "type": "bigint",
+      "nullable": false,
+      "wire_field": "seq",
+      "description": "The contract's uint64 range exceeds signed bigint, but seq is session-scoped and resets on every adapter restart, so at any plausible tick rate it stays far below 2^63. Stored as bigint rather than numeric(20,0) to keep the column fixed-width and delta-compressible."
+    }
+  ],
+  "primary_key": null,
+  "indexes": [
+    {
+      "name": "ticks_provider_symbol_recv_ts_idx",
+      "columns": ["provider", "symbol", "recv_ts"],
+      "unique": false,
+      "description": "The documented access path: one provider's symbol over a time range."
+    }
+  ],
+  "checks": [{ "name": "ticks_seq_non_negative", "expression": "seq >= 0" }],
+  "notes": [
+    "No unique constraint on the dedup key (provider, symbol, session_id, seq): TimescaleDB requires every unique index to include the partitioning column, and adding recv_ts to that tuple would enforce something other than the contract's key. Deduplication is the consumer's job, via tqtk_common.delivery.DeliveryTracker."
+  ]
+}

@@ -7,8 +7,8 @@ is Java (Phase 2) and cannot import that package, so the authority lives outside
 ```
 contracts/
   wire/       Tick and Bar record schemas + sample records   (data-contract, task 2.1)
-  storage/    versioned ticks/bars table schemas             (task 2.6 — not yet written)
-  tests/      every sample record validates against its schema
+  storage/    versioned ticks/bars table contracts            (task 2.6)
+  tests/      the fixtures validate, and the two surfaces agree
 ```
 
 ## Wire contract (`wire/`)
@@ -66,6 +66,29 @@ The contract version is the `v1` segment of each schema's `$id`. A change that a
 consumer could not survive — a removed or renamed field, a narrowed type, a changed unit — is a new
 `$id` version, not an edit in place. Additive changes (a new optional field) keep `v1` and are made
 in one PR across this directory and every implementation of it.
+
+## Storage contract (`storage/`)
+
+The second contract surface: the `ticks` and `bars` table schemas, each an artifact carrying its
+own `schema_version` rather than existing only as whatever DDL happened to be applied.
+
+| File | Defines |
+|---|---|
+| `storage/ticks.v1.json` | the `ticks` table, owned by `tick-persistence-svc` |
+| `storage/bars.v1.json` | the `bars` table, owned by `bar-persistence-svc` |
+| `storage/storage-contract.schema.json` | the shape those two are written in |
+
+- **Each table versions independently.** Two owners, two release cadences; `schema_version` is an
+  integer bumped in the same change as any column addition, and the filename carries it.
+- **Additive only within a lineage.** No `DROP`, no `RENAME`, no type-narrowing; a new column is
+  nullable or defaulted, so a reader built against an earlier version keeps working.
+- **DDL ownership follows sole-writer ownership.** The owning service applies its own migrations on
+  startup, under an advisory lock. Nothing is created by platform bootstrap.
+- **Every column carries its `wire_field`**, so a test can hold the storage and wire surfaces
+  together instead of trusting that both were updated.
+- **Prices are `double precision`, timestamps are `timestamptz`, and no column is JSONB** — a price
+  document would hide the schema from `information_schema`, from the shared fixture, and from
+  Timescale's per-column compression.
 
 ### Validating a record
 

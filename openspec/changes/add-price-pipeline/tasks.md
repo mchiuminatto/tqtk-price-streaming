@@ -22,7 +22,7 @@
 - [x] 2.4 Implement `seq`/`session_id` generation (per-`(provider,symbol)` counter reset to 0 per
       session, paired `session_id`) in `tqtk-common`; verify a unit test confirms reset-on-new-session
       and gapless monotonic increment within a session.
-- [ ] 2.5 Implement the consumer-side gap-detection/dedup helper keyed on
+- [x] 2.5 Implement the consumer-side gap-detection/dedup helper keyed on
       `(provider, symbol, session_id, seq)` in `tqtk-common`; verify unit tests cover: an in-session
       gap (flagged), a session change (not flagged as loss), and a duplicate delivery (deduped).
 - [ ] 2.6 Write the versioned storage schema contract artifact for the `ticks` and `bars` tables

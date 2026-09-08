@@ -1,7 +1,13 @@
-"""Shared library for the tqtk price pipeline.
+"""Shared contract types and runtime infrastructure for the tqtk price pipeline."""
 
-Implements the language-neutral data contract (`data-contract`) and the common
-service runtime (`service-runtime`) that every service depends on.
-"""
+from tqtk_common.records import MICROS_PER_SECOND, UINT64_MAX, Bar, Record, Side, Tick, Timeframe
 
-__version__ = "0.1.0"
+__all__ = [
+    "MICROS_PER_SECOND",
+    "UINT64_MAX",
+    "Bar",
+    "Record",
+    "Side",
+    "Tick",
+    "Timeframe",
+]

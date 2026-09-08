@@ -14,7 +14,7 @@
       `tqtk-common`, as the authority both Python and a future Java adapter implement, with `Bar`
       carrying `side` (`bid` | `ask`, closed enum); verify a sample `Tick` and a sample `Bar` of
       each side validate against it, and a third `side` value is rejected.
-- [ ] 2.2 Implement `Tick`/`Bar` Python models in `tqtk-common` conforming to the schema; verify a
+- [x] 2.2 Implement `Tick`/`Bar` Python models in `tqtk-common` conforming to the schema; verify a
       unit test round-trips serialize/deserialize without data loss.
 - [ ] 2.3 Implement stream/key-name builders (`ticks.raw.{provider}.{symbol}`,
       `bars.{tf}.{provider}.{symbol}`, `bar_state:{provider}:{symbol}:{tf}`) in `tqtk-common`;

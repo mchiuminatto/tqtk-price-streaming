@@ -128,7 +128,7 @@ Redis streams: `ticks.raw.{provider}.{symbol}`, `bars.{timeframe}.{provider}.{sy
 
 ### Two contract surfaces, both versioned
 
-The `Tick`/`Bar` records above are the **wire contract** — defined language-neutrally (JSON Schema or `.proto`) so a future Java adapter conforms without importing the Python package. The `ticks`/`bars` table schema is a **second contract surface**, and gets the same treatment rather than being left as whatever DDL happens to have been applied:
+The `Tick`/`Bar` records above are the **wire contract** — defined language-neutrally in JSON Schema (draft 2020-12, under `contracts/wire/`) so a future Java adapter conforms without importing the Python package. JSON Schema rather than `.proto` because the bus carries Redis field maps, not a binary protocol: protobuf's codegen would buy little and would add `protoc` to both the Python and the Java build. The `ticks`/`bars` table schema is a **second contract surface**, and gets the same treatment rather than being left as whatever DDL happens to have been applied:
 
 - **Versioned artifact.** The table schema carries an explicit `schema_version` and lives beside the wire schema, not only in the database.
 - **DDL ownership follows sole-writer ownership.** `tick-persistence-svc` owns the `ticks` schema; `bar-persistence-svc` owns `bars`. Each applies its own migrations on startup, under a Postgres advisory lock so concurrent instances migrate exactly once. Nothing is created by platform bootstrap or by an out-of-band manual step.

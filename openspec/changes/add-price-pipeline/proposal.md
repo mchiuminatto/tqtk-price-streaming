@@ -118,8 +118,9 @@ None — greenfield project, no existing specs.
 - **New infrastructure**: Redis (bus + checkpoint store, AOF+RDB), PostgreSQL + TimescaleDB
   (server and extension only — application tables are created by their owning services' migrations,
   not by platform bootstrap), Prometheus, Grafana.
-- **Dependencies**: Python 3.x, a uv workspace, `redis-py`, an async web framework for
-  health/metrics endpoints, `prometheus_client`, a Postgres driver, TimescaleDB extension.
+- **Dependencies**: Python 3.x, a uv workspace, `pydantic` (contract records in `tqtk-common`),
+  `redis-py`, an async web framework for health/metrics endpoints, `prometheus_client`, a Postgres
+  driver, TimescaleDB extension; `jsonschema` as a dev dependency, for the contract tests.
 - **APIs introduced**: WebSocket relay (streaming-gateway), REST (historical-query), Prometheus
   `/metrics` on every service.
 - **New CI enforcement**: a check rejecting destructive migrations (`DROP`/`RENAME`/type-narrowing)

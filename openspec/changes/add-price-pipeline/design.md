@@ -37,6 +37,25 @@ Java adapter conforms to the same contract without depending on `tqtk-common`. *
 rejected**: let the Python types be the de facto contract — works until Phase 2, then forces a
 retrofit onto a component that was never designed against a neutral spec.
 
+### Contract records are pydantic models, and the schema files stay the authority
+`tqtk-common` models `Tick`/`Bar` as frozen pydantic v2 models validating at construction, so a
+record that breaks an invariant cannot reach the bus. Lax-mode coercion also turns the flat string
+map a Redis stream entry carries back into typed fields in one call. **Alternative rejected**:
+stdlib dataclasses — keeps the shared library dependency-free, but needs a hand-written parse table
+per record to redo what coercion does natively, and reports only the first violation rather than
+all of them.
+
+The authority runs one way only: `contracts/wire/*.schema.json` is the contract and the models
+conform to it. **Alternative rejected**: generating the schema from `model_json_schema()` — it
+removes the duplicated field list, but makes the Java adapter conform to a Python artifact, which
+is the single property `contracts/` living outside `tqtk-common` exists to preserve. **Alternative
+rejected**: generating the models from the schema — the authority direction is right, but it adds a
+codegen step that produces only the field list, while the invariants JSON Schema cannot express and
+the helpers keyed on them (`Tick.price(side)`, `Bar.identity`, `Bar.window_key`) still have to be
+written by hand. The duplication that remains is held by a test asserting the model's field names
+and required set equal the schema's, so drift fails CI rather than depending on anyone remembering
+both files.
+
 ### Persisted schema is a versioned contract, not an implicit shared surface
 `historical-query-svc` reads the `ticks` and `bars` tables that `tick-persistence-svc` and
 `bar-persistence-svc` own — a CQRS read model, which is a legitimate pattern, but one that was

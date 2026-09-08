@@ -46,7 +46,9 @@ implementer in any language can consume exactly one file per record type.
 
 ### Invariants JSON Schema cannot express
 
-Documented here and asserted by the implementations and their tests, not by validation:
+Documented here and asserted by the implementations and their tests, not by validation. In
+Python that is `tqtk_common.records`, which raises on construction; a test there also asserts its
+models declare exactly these schemas' fields, so the two copies cannot drift apart silently:
 
 - `ask >= bid`.
 - `high >= max(open, close)`, `low <= min(open, close)`, `high >= low`.
@@ -68,7 +70,8 @@ in one PR across this directory and every implementation of it.
 ### Validating a record
 
 ```bash
-uv run --group dev pytest contracts -q          # the whole fixture set
+uv run --group dev pytest contracts -q          # schemas and fixtures, language-neutral
+uv run --group dev pytest libs/tqtk-common -q   # and what the Python models emit
 ```
 
 Python: `jsonschema`, `Draft202012Validator`. Java: `networknt/json-schema-validator` or

@@ -23,6 +23,10 @@ openspec/
 deploy/
 tools/
 
+# The contracts are a build- and test-time authority: services carry their
+# implementation of them (tqtk-common), never the schema files themselves.
+contracts/
+
 # Python build and test caches
 **/__pycache__/
 **/*.py[cod]

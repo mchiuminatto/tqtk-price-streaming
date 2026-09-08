@@ -30,8 +30,8 @@ from pathlib import Path
 MEMBER_ROOTS = {"libs": "lib", "services": "service"}
 
 # Paths that change the resolution or the build of every member: the workspace
-# definition itself, the lockfile, the shared build context filter, and the CI
-# tooling that decides all of this.
+# definition itself, the lockfile, the shared build context filter, the CI
+# tooling that decides all of this, and the contracts every member implements.
 GLOBAL_PATHS = frozenset(
     {
         "pyproject.toml",
@@ -41,6 +41,7 @@ GLOBAL_PATHS = frozenset(
 )
 GLOBAL_PREFIXES = (
     ".github/",
+    "contracts/",
     "tools/",
 )
 

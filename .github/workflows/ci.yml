@@ -92,6 +92,10 @@ jobs:
       - name: Test the path-filter rules
         run: uv run --frozen pytest tools/ci -q
 
+      # The wire contract belongs to no member, so the matrix never covers it.
+      - name: Validate the wire contract
+        run: uv run --frozen pytest contracts -q
+
   # One build/test job per affected member. `fail-fast: false` so one service's
   # failure does not mask another's.
   member:

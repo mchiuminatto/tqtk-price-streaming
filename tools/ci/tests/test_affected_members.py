@@ -67,6 +67,12 @@ def test_workspace_and_lockfile_changes_select_every_member(members):
         assert names(affected_members([path], members)) == names(sorted(members)), path
 
 
+def test_contract_change_selects_every_member(members):
+    """The contract is the one artifact every member implements — nothing may miss its change."""
+    selected = affected_members(["contracts/wire/tick.schema.json"], members)
+    assert names(selected) == names(sorted(members))
+
+
 def test_ci_tooling_change_selects_every_member(members):
     selected = affected_members(["tools/ci/affected_members.py"], members)
     assert names(selected) == names(sorted(members))

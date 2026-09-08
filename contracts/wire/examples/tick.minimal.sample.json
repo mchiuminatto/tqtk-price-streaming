@@ -1,0 +1,10 @@
+{
+  "provider": "synthetic",
+  "symbol": "GBPJPY",
+  "provider_ts": 1788523200456000,
+  "recv_ts": 1788523200456877,
+  "bid": 198.412,
+  "ask": 198.427,
+  "session_id": "01J9Z6XK7Q8V3N2M4P5R6S7T8U",
+  "seq": 0
+}

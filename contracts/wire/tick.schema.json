@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/mchiuminatto/tqtk-price-streaming/contracts/wire/v1/tick.schema.json",
+  "title": "Tick",
+  "description": "One raw quote from one provider for one symbol, as published to ticks.raw.{provider}.{symbol}. This file is the authority every implementation conforms to (tqtk-common in Python, feed-adapter-dukascopy in Java); neither is the contract itself. Timestamps are integer microseconds since the Unix epoch, UTC. Unknown fields are permitted so a producer can add a field before every consumer has adopted it.",
+  "type": "object",
+  "required": [
+    "provider",
+    "symbol",
+    "provider_ts",
+    "recv_ts",
+    "bid",
+    "ask",
+    "session_id",
+    "seq"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "provider": {
+      "description": "Data source that produced this tick. Appears verbatim in the stream name ticks.raw.{provider}.{symbol}, so it may not contain the '.' or ':' used as stream- and key-name separators. Records from different providers are never blended.",
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]*$",
+      "minLength": 1,
+      "maxLength": 32,
+      "examples": ["synthetic", "dukascopy"]
+    },
+    "symbol": {
+      "description": "Canonical pipeline symbol, normalized across providers. Appears verbatim in the stream name, so it may not contain '.' or ':'. The deployed set is sourced from data/*.parquet, not from this contract.",
+      "type": "string",
+      "pattern": "^[A-Z0-9]{2,20}$",
+      "examples": ["EURUSD", "GBPJPY"]
+    },
+    "provider_symbol": {
+      "description": "The provider's own ticker for this instrument, when it differs from the canonical symbol. Optional; carried for traceability back to the source feed, never for keying.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "examples": ["EUR/USD"]
+    },
+    "provider_ts": {
+      "description": "The provider's own timestamp for the quote, in microseconds since the Unix epoch (UTC). Carries only the resolution the provider supplies (the Dukascopy sample is milliseconds, so its low three digits are zero); never substituted with local time.",
+      "type": "integer",
+      "minimum": 0,
+      "examples": [1756944000123000]
+    },
+    "recv_ts": {
+      "description": "When the feed adapter received the quote, in microseconds since the Unix epoch (UTC). Stamped exactly once, by the adapter, and monotonic non-decreasing per (provider, symbol). This is the pipeline's event time: bar bucketing and every hop's latency measurement key on it.",
+      "type": "integer",
+      "minimum": 0,
+      "examples": [1756944000123412]
+    },
+    "bid": {
+      "description": "Best bid price, in the instrument's quote currency.",
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "examples": [1.17042]
+    },
+    "ask": {
+      "description": "Best ask price, in the instrument's quote currency. Expected to be >= bid; the relation is not expressible in JSON Schema and is asserted by the implementations.",
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "examples": [1.17048]
+    },
+    "bid_size": {
+      "description": "Size available at the bid, in the provider's own volume units. Optional: not every provider supplies it.",
+      "type": "number",
+      "minimum": 0,
+      "examples": [1.5]
+    },
+    "ask_size": {
+      "description": "Size available at the ask, in the provider's own volume units. Optional: not every provider supplies it.",
+      "type": "number",
+      "minimum": 0,
+      "examples": [2.25]
+    },
+    "session_id": {
+      "description": "Identifies the one feed-adapter session that produced this tick. A new value is assigned on every adapter (re)start, which is what lets a consumer tell an expected restart apart from real tick loss.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+      "minLength": 1,
+      "maxLength": 64,
+      "examples": ["01J9Z6XK7Q8V3N2M4P5R6S7T8U"]
+    },
+    "seq": {
+      "description": "uint64 counter, monotonic and gapless per (provider, symbol) within one session, reset to 0 at the start of every session. A jump > 1 inside one session_id is real tick loss; a session_id change is not. Dedup and reconciliation key on (provider, symbol, session_id, seq), never on seq alone.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615,
+      "examples": [0, 1, 41337]
+    }
+  }
+}

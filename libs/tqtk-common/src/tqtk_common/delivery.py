@@ -1,5 +1,3 @@
-# TODO: Understand this module.
-
 """Consumer-side gap detection and deduplication, keyed on the contract's dedup tuple.
 
 The producer side of this is `FeedSession`: `seq` is gapless per `(provider, symbol)` within a

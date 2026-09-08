@@ -19,7 +19,7 @@
 - [x] 2.3 Implement stream/key-name builders (`ticks.raw.{provider}.{symbol}`,
       `bars.{tf}.{provider}.{symbol}`, `bar_state:{provider}:{symbol}:{tf}`) in `tqtk-common`;
       verify unit tests cover each naming pattern.
-- [ ] 2.4 Implement `seq`/`session_id` generation (per-`(provider,symbol)` counter reset to 0 per
+- [x] 2.4 Implement `seq`/`session_id` generation (per-`(provider,symbol)` counter reset to 0 per
       session, paired `session_id`) in `tqtk-common`; verify a unit test confirms reset-on-new-session
       and gapless monotonic increment within a session.
 - [ ] 2.5 Implement the consumer-side gap-detection/dedup helper keyed on

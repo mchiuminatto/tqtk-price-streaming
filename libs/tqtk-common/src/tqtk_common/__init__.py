@@ -8,6 +8,7 @@ from tqtk_common.names import (
     tick_stream,
 )
 from tqtk_common.records import MICROS_PER_SECOND, UINT64_MAX, Bar, Record, Side, Tick, Timeframe
+from tqtk_common.session import FeedSession
 
 __all__ = [
     "BAR_STREAM_PATTERN",
@@ -15,6 +16,7 @@ __all__ = [
     "TICK_STREAM_PATTERN",
     "UINT64_MAX",
     "Bar",
+    "FeedSession",
     "Record",
     "Side",
     "Tick",

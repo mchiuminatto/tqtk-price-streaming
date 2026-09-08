@@ -16,7 +16,7 @@
       each side validate against it, and a third `side` value is rejected.
 - [x] 2.2 Implement `Tick`/`Bar` Python models in `tqtk-common` conforming to the schema; verify a
       unit test round-trips serialize/deserialize without data loss.
-- [ ] 2.3 Implement stream/key-name builders (`ticks.raw.{provider}.{symbol}`,
+- [x] 2.3 Implement stream/key-name builders (`ticks.raw.{provider}.{symbol}`,
       `bars.{tf}.{provider}.{symbol}`, `bar_state:{provider}:{symbol}:{tf}`) in `tqtk-common`;
       verify unit tests cover each naming pattern.
 - [ ] 2.4 Implement `seq`/`session_id` generation (per-`(provider,symbol)` counter reset to 0 per

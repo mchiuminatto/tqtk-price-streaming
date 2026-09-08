@@ -18,12 +18,15 @@ independent of the critical path.
 ### Requirement: `tick_to_bar_latency_ms` SLA measurement
 Aggregation SHALL record, for every bar update it publishes, the elapsed time between the
 triggering tick's `recv_ts` and the publish, as a histogram labeled by `provider`, `symbol`, and
-`timeframe`.
+`timeframe`. The histogram SHALL NOT carry a `side` label: a window's two side-records are
+published in one atomic operation, so one observation covers both and a `side` label would record
+the same latency twice.
 
 #### Scenario: A bar update is published
 - **WHEN** aggregation publishes a bar update in response to a tick
-- **THEN** the elapsed time since that tick's `recv_ts` is recorded into the
-  `tick_to_bar_latency_ms` histogram, labeled by `provider`, `symbol`, and `timeframe`
+- **THEN** the elapsed time since that tick's `recv_ts` is recorded once into the
+  `tick_to_bar_latency_ms` histogram, labeled by `provider`, `symbol`, and `timeframe`, covering
+  both side-records of that publish
 
 ### Requirement: Consumer-lag metric
 Every consumer-group-based service SHALL expose a consumer-lag metric reflecting how far behind
@@ -35,11 +38,12 @@ the stream head its consumption position is.
 
 ### Requirement: Late-tick metric
 Aggregation SHALL expose `late_ticks_total`, incremented per `(provider, symbol, timeframe)` each
-time a tick is dropped for arriving after its bar closed.
+time a tick is dropped for arriving after its bar closed. It SHALL NOT carry a `side` label: a
+late tick is late for both sides of its window at once, so the drop is counted once.
 
 #### Scenario: A late tick is dropped
 - **WHEN** aggregation drops a tick because its bar has already closed
-- **THEN** `late_ticks_total{provider,symbol,timeframe}` is incremented
+- **THEN** `late_ticks_total{provider,symbol,timeframe}` is incremented once, not once per side
 
 ### Requirement: Structured logging without per-tick volume
 Every service SHALL emit structured JSON logs to stdout. INFO level SHALL cover service

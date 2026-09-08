@@ -214,6 +214,28 @@ def test_tick_accepts_a_zero_spread(tick: Tick):
     assert mutate(tick, ask=tick.bid).spread == 0
 
 
+@pytest.mark.parametrize("value", [float("inf"), float("-inf"), float("nan")])
+@pytest.mark.parametrize("field", ["bid", "ask", "bid_size", "ask_size"])
+def test_a_non_finite_price_or_size_is_refused(tick: Tick, field: str, value: float):
+    """`inf > 0` is true, so `gt=0` alone would let it through - and `json.dumps` would then
+    emit `Infinity`, which no other language's parser accepts."""
+    with pytest.raises(ValueError):
+        mutate(tick, **{field: value})
+
+
+def test_a_non_finite_bar_price_is_refused(bar: Bar):
+    for field in ("open", "high", "low", "close"):
+        with pytest.raises(ValueError):
+            mutate(bar, **{field: float("inf")})
+
+
+def test_every_serialized_record_is_real_json(tick: Tick, bar: Bar):
+    """`Infinity`/`NaN` are a Python json extension, not JSON; a record carrying one would be
+    unparseable by the Java adapter that implements the same schemas."""
+    for record in (tick, bar):
+        json.loads(json.dumps(record.to_dict(), allow_nan=False))
+
+
 def test_tick_rejects_a_seq_outside_uint64(tick: Tick):
     with pytest.raises(ValueError, match="greater than or equal to 0"):
         mutate(tick, seq=-1)

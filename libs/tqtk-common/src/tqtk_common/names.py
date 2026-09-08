@@ -45,13 +45,13 @@ _SYMBOL: Final = re.compile(SYMBOL_PATTERN)
 
 
 def _checked_provider(provider: str) -> str:
-    if not _PROVIDER.match(provider):
+    if not _PROVIDER.fullmatch(provider):
         raise ValueError(f"provider {provider!r} does not match {PROVIDER_PATTERN}")
     return provider
 
 
 def _checked_symbol(symbol: str) -> str:
-    if not _SYMBOL.match(symbol):
+    if not _SYMBOL.fullmatch(symbol):
         raise ValueError(f"symbol {symbol!r} does not match {SYMBOL_PATTERN}")
     return symbol
 

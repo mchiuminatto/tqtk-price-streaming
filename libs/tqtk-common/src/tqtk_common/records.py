@@ -29,8 +29,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 MICROS_PER_SECOND: Final = 1_000_000
 UINT64_MAX: Final = 2**64 - 1
 
-Price = Annotated[float, Field(gt=0)]
-Size = Annotated[float, Field(ge=0)]
+Price = Annotated[float, Field(gt=0, allow_inf_nan=False)]
+Size = Annotated[float, Field(ge=0, allow_inf_nan=False)]
 EpochMicros = Annotated[int, Field(ge=0)]
 Name = Annotated[str, Field(min_length=1)]
 

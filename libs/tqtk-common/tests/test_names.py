@@ -121,6 +121,8 @@ def test_the_tick_glob_does_not_match_a_bar_stream():
         "E" * 21,  # above the 20-character ceiling
         "",
         "EURUSD ",
+        "EURUSD\n",  # `$` matches before a trailing newline; `fullmatch` is what refuses it
+        "\nEURUSD",
     ],
 )
 def test_a_symbol_that_would_corrupt_a_name_is_refused(symbol: str):
@@ -130,7 +132,16 @@ def test_a_symbol_that_would_corrupt_a_name_is_refused(symbol: str):
 
 @pytest.mark.parametrize(
     "provider",
-    ["syn.thetic", "syn:thetic", "Synthetic", "", "-synthetic", "synthetic feed"],
+    [
+        "syn.thetic",
+        "syn:thetic",
+        "Synthetic",
+        "",
+        "-synthetic",
+        "synthetic feed",
+        "synthetic\n",  # same trailing-newline hole as the symbol case above
+        "\nsynthetic",
+    ],
 )
 def test_a_provider_that_would_corrupt_a_name_is_refused(provider: str):
     with pytest.raises(ValueError, match="provider"):

@@ -12,13 +12,16 @@ Two things can go wrong, and they need different evidence:
 *Lineage* - a new version of a table that removes or narrows something the previous version had.
 Found on disk, by comparing consecutive `{table}.v{n}.json` files.
 
-*Immutability* - an edit to a version that has already shipped. Found in git, by comparing each
-artifact against the same file at a base ref. A reader binds to a version and expects it to mean
-what it meant when it was released, so v1 is frozen once merged; the way to change the schema is
-v2. Free text (descriptions, notes, rationales) is exempt - only the schema itself is frozen.
+*Immutability* - an edit to a version that has already shipped, or its removal. Found in git, by
+comparing the artifacts on disk against the same paths at a base ref. A reader binds to a version
+and expects it to mean what it meant when it was released, so v1 is frozen once merged; the way to
+change the schema is v2. Free text (descriptions, notes, rationales) is exempt - only the schema
+itself is frozen. Deletion is checked from the base ref's side rather than from disk, because a
+file that is gone appears in no glob of the working tree.
 
-A rename shows up as a removal plus an addition, so it needs no separate detection: the removal
-half is already a violation.
+A column rename shows up as a removal plus an addition, so it needs no separate detection: the
+removal half is already a violation. A *table* rename is a file deletion plus an unrelated new
+file, which is why deletion is checked at all.
 
 This guards the artifacts rather than the SQL migrations that tasks 7.1 and 8.1 will write. That
 is not a gap: those services' contract tests assert their migrations produce the schema their
@@ -39,11 +42,16 @@ import json
 import subprocess
 import sys
 from dataclasses import dataclass
+from fnmatch import fnmatch
 from itertools import pairwise
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Final
 
 STORAGE_DIRNAME: Final = "storage"
+
+# `storage-contract.schema.json` lives beside the artifacts and is not one; both the on-disk
+# scan and the base-ref scan must select by the same pattern or they compare different sets.
+ARTIFACT_GLOB: Final = "*.v*.json"
 
 # Free text may change in a released version; the schema may not.
 PROSE_KEYS: Final = frozenset({"description", "notes", "rationale", "$schema"})
@@ -144,7 +152,7 @@ def check_immutability(committed: dict, current: dict) -> list[Violation]:
 
 
 def artifact_paths(contracts_dir: Path) -> list[Path]:
-    return sorted((contracts_dir / STORAGE_DIRNAME).glob("*.v*.json"))
+    return sorted((contracts_dir / STORAGE_DIRNAME).glob(ARTIFACT_GLOB))
 
 
 def lineages(paths: list[Path]) -> dict[str, dict[int, dict]]:
@@ -185,6 +193,41 @@ def at_ref(path: Path, ref: str, repo_root: Path) -> dict | None:
     return json.loads(result.stdout)
 
 
+def artifact_paths_at_ref(ref: str, contracts_dir: Path, repo_root: Path) -> set[Path]:
+    """The artifacts that existed at `ref`, so a deletion is as visible as an edit.
+
+    Empty when the contracts directory sits outside the repository, which is the case the tests
+    use: nothing there was ever released, so nothing there can be deleted.
+    """
+    if not contracts_dir.is_relative_to(repo_root):
+        return set()
+    relative = contracts_dir.relative_to(repo_root) / STORAGE_DIRNAME
+    result = subprocess.run(
+        ["git", "ls-tree", "-r", "--name-only", ref, "--", relative.as_posix()],
+        capture_output=True,
+        text=True,
+        cwd=repo_root,
+        check=False,
+    )
+    if result.returncode != 0:
+        return set()
+    return {
+        repo_root / line
+        for line in result.stdout.splitlines()
+        if fnmatch(PurePosixPath(line).name, ARTIFACT_GLOB)
+    }
+
+
+def check_deletion(released: dict) -> Violation:
+    """What a released version may do by disappearing: nothing."""
+    return Violation(
+        released["table"],
+        "released version deleted",
+        f"v{released['schema_version']} no longer exists; a released version is frozen, "
+        "not removable - supersede it with a new version instead",
+    )
+
+
 def ref_exists(ref: str, repo_root: Path) -> bool:
     return (
         subprocess.run(
@@ -216,10 +259,15 @@ def main(argv: list[str] | None = None) -> int:
             committed = at_ref(path, args.base, repo_root)
             if committed is not None:
                 violations.extend(check_immutability(committed, json.loads(path.read_text())))
+        released_paths = artifact_paths_at_ref(args.base, args.contracts_dir, repo_root)
+        for missing in sorted(released_paths - set(paths)):
+            released = at_ref(missing, args.base, repo_root)
+            if released is not None:
+                violations.append(check_deletion(released))
     else:
         print(
             f"warning: base ref {args.base!r} does not resolve; checked the lineage on disk only, "
-            "not whether a released version was edited",
+            "not whether a released version was edited or deleted",
             file=sys.stderr,
         )
 

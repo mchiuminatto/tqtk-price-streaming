@@ -19,6 +19,8 @@ from typing import Any
 import pytest
 
 from tools.ci.additive_only import (
+    artifact_paths_at_ref,
+    check_deletion,
     check_immutability,
     check_lineage,
     check_lineages,
@@ -29,6 +31,7 @@ from tools.ci.additive_only import (
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SCRIPT = REPO_ROOT / "tools" / "ci" / "additive_only.py"
+STORAGE_DIRNAME = "storage"
 
 
 def column(name: str, type_: str = "text", *, nullable: bool = True, **extra: Any) -> dict:
@@ -169,6 +172,83 @@ def test_strip_prose_leaves_the_schema_alone():
     assert "rationale" not in stripped["hypertable"]
     assert stripped["columns"] == artifact(1)["columns"]
     assert stripped["schema_version"] == 1
+
+
+def test_deleting_a_released_version_fails():
+    """A file that is gone appears in no glob of the working tree, so it is checked from git."""
+    assert check_deletion(artifact(1)).rule == "released version deleted"
+
+
+def git(repo: Path, *args: str) -> None:
+    subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", *args],
+        cwd=repo,
+        capture_output=True,
+        check=True,
+    )
+
+
+@pytest.fixture
+def released_repo(tmp_path: Path) -> Path:
+    """A repository with two released contracts committed, and the script inside it.
+
+    The script derives its repo root from its own location, so it has to live in the fixture
+    repository rather than be imported from this one.
+    """
+    storage = tmp_path / "contracts" / STORAGE_DIRNAME
+    storage.mkdir(parents=True)
+    (storage / "ticks.v1.json").write_text(json.dumps(artifact(1)))
+    (storage / "bars.v1.json").write_text(json.dumps(artifact(1, table="bars")))
+    tools = tmp_path / "tools" / "ci"
+    tools.mkdir(parents=True)
+    (tools / "additive_only.py").write_text(SCRIPT.read_text())
+    git(tmp_path, "init", "-q", ".")
+    git(tmp_path, "add", "-A")
+    git(tmp_path, "commit", "-qm", "release v1")
+    return tmp_path
+
+
+def run_in(repo: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(repo / "tools" / "ci" / "additive_only.py"), "--base", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=repo,
+    )
+
+
+def test_the_released_repository_is_clean_to_begin_with(released_repo: Path):
+    """Without this the deletion tests below could pass for the wrong reason."""
+    assert run_in(released_repo).returncode == 0
+
+
+def test_deleting_a_released_contract_is_rejected(released_repo: Path):
+    (released_repo / "contracts" / STORAGE_DIRNAME / "ticks.v1.json").unlink()
+    result = run_in(released_repo)
+    assert result.returncode == 1
+    assert "released version deleted" in result.stderr
+
+
+def test_renaming_a_released_contract_is_rejected(released_repo: Path):
+    """A table rename is a deletion plus an unrelated new file; the deletion half is the catch."""
+    storage = released_repo / "contracts" / STORAGE_DIRNAME
+    (storage / "ticks.v1.json").rename(storage / "tick_data.v1.json")
+    result = run_in(released_repo)
+    assert result.returncode == 1
+    assert "released version deleted" in result.stderr
+
+
+def test_adding_a_new_table_is_not_a_deletion(released_repo: Path):
+    """Only a path that existed at the base ref and no longer does is a deletion."""
+    storage = released_repo / "contracts" / STORAGE_DIRNAME
+    (storage / "quotes.v1.json").write_text(json.dumps(artifact(1, table="quotes")))
+    assert run_in(released_repo).returncode == 0
+
+
+def test_a_contracts_directory_outside_the_repository_has_nothing_released(tmp_path: Path):
+    """The other tests pass --contracts-dir into a temp directory; nothing there was released."""
+    assert artifact_paths_at_ref("HEAD", tmp_path, REPO_ROOT) == set()
 
 
 # --- lineages across several tables and versions ------------------------------------------------

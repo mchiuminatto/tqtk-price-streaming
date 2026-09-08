@@ -34,7 +34,7 @@
       given `schema_version` from the contract artifact, for use by both writer and reader contract
       tests; verify it produces a schema a plain `SELECT` of every contracted column succeeds
       against.
-- [ ] 2.8 Add a CI check that fails on a destructive migration against `ticks` or `bars` (`DROP`
+- [x] 2.8 Add a CI check that fails on a destructive migration against `ticks` or `bars` (`DROP`
       COLUMN, `RENAME`, or type-narrowing) within a released `schema_version` lineage; verify it
       passes on an added nullable column and fails on a dropped one.
 

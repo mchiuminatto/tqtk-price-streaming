@@ -60,6 +60,11 @@
             "description": "A column added in a later version of this lineage must be nullable or carry a default, so a reader built against an earlier version keeps working.",
             "type": "boolean"
           },
+          "default": {
+            "description": "A SQL default expression. A column added in a later version of this lineage must be nullable or carry one of these, so a reader built against an earlier version keeps working; the additive-only check enforces exactly that pair.",
+            "type": "string",
+            "minLength": 1
+          },
           "wire_field": {
             "description": "The field of the corresponding wire record this column stores. Present on every column that has one, which is what lets a test hold the two contract surfaces together.",
             "type": "string"

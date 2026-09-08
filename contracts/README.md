@@ -80,8 +80,15 @@ own `schema_version` rather than existing only as whatever DDL happened to be ap
 
 - **Each table versions independently.** Two owners, two release cadences; `schema_version` is an
   integer bumped in the same change as any column addition, and the filename carries it.
-- **Additive only within a lineage.** No `DROP`, no `RENAME`, no type-narrowing; a new column is
-  nullable or defaulted, so a reader built against an earlier version keeps working.
+- **One file per version, and a released one is frozen.** `ticks.v1.json` and a later
+  `ticks.v2.json` coexist, because a reader binds to a version and expects it to keep meaning what
+  it meant when it shipped. Changing the schema means writing the next version, never editing the
+  last; only the prose in a released file may change.
+- **Additive only within a lineage, enforced in CI.** No `DROP`, no `RENAME`, no type-narrowing,
+  no tightening a column to `NOT NULL`; a new column is nullable or carries a `default`, so a
+  reader built against an earlier version keeps working. `tools/ci/additive_only.py` fails the
+  build on any of those, and on an edit to an already-released version. Run it locally with
+  `uv run python tools/ci/additive_only.py --base main`.
 - **DDL ownership follows sole-writer ownership.** The owning service applies its own migrations on
   startup, under an advisory lock. Nothing is created by platform bootstrap.
 - **Every column carries its `wire_field`**, so a test can hold the storage and wire surfaces

@@ -114,6 +114,22 @@ def test_ticks_renders_no_unique_index(contracts):
     assert not any("UNIQUE" in statement for statement in render_ddl(contracts["ticks"]))
 
 
+def test_a_defaulted_column_renders_its_default(contracts):
+    """The additive-only rule admits a NOT NULL column that carries a default, so DDL must too."""
+    contract = contracts["ticks"]
+    with_default = contract.model_copy(
+        update={
+            "columns": (
+                *contract.columns,
+                contract.columns[0].model_copy(
+                    update={"name": "venue", "nullable": False, "default": "'unknown'"}
+                ),
+            )
+        }
+    )
+    assert "venue text DEFAULT 'unknown' NOT NULL" in render_ddl(with_default)[0]
+
+
 @pytest.mark.parametrize("table", TABLES)
 def test_the_hypertable_call_can_be_omitted(table: str, contracts):
     """A reader asserting a column exists should not need the TimescaleDB extension."""

@@ -49,6 +49,7 @@ class Column(_Artifact):
     name: str
     type: str
     nullable: bool
+    default: str | None = None
     wire_field: str | None = None
 
 
@@ -150,7 +151,9 @@ def create_schema(cursor: Cursor, contract: StorageContract, *, hypertable: bool
 
 def _create_table(contract: StorageContract) -> str:
     definitions = [
-        f"    {column.name} {column.type}{'' if column.nullable else ' NOT NULL'}"
+        f"    {column.name} {column.type}"
+        f"{'' if column.default is None else f' DEFAULT {column.default}'}"
+        f"{'' if column.nullable else ' NOT NULL'}"
         for column in contract.columns
     ]
     if contract.primary_key is not None:

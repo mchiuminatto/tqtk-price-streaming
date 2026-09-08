@@ -411,6 +411,15 @@ list and the fidelity-calibration inputs can never drift apart — adding a symb
 - Thread C / Redis sizing: 4-6h retention ~325-500MB -> **~700MB-1.1GB**; 24h ~2-2.5GB ->
   **~4.3-5.4GB**; the Thread C hard-cap backstop's `N` (~500MB/provider/6h) -> **~1.1GB**.
 
+**Revised again by the bid/ask side split** (settled later; see `add-price-pipeline`'s `design.md`,
+"Bid/ask carried as two side-discriminated `Bar` records"). Every bar window produces two records:
+- LAN bar-message throughput **~3,120/sec -> ~6,240/sec**, and the bar share of the Redis figures
+  above doubles with it. Tick volume and the `ticks` table are unaffected — a `Tick` already
+  carried both `bid` and `ask`.
+- Persisted closed-bar rows **~13/sec -> ~27/sec (~2.3M/day)**.
+- Actor count is **unchanged at 104**: `side` is deliberately not part of the actor key, since both
+  sides derive from the same tick and close on the same boundary.
+
 **Not affected:** the 8-timeframe set, the per-`(provider,symbol,timeframe)` actor design itself,
 the bucketing/close/checkpoint semantics (Threads B/D) — none of those are symbol-count-dependent,
 only symbol-count-*multiplied*.

@@ -17,23 +17,63 @@ Every tick record SHALL carry `provider`, `symbol`, `provider_ts`, `recv_ts`, `b
   `session_id`, and `seq`
 
 ### Requirement: Bar record schema
-Every bar record SHALL carry `provider`, `symbol`, `timeframe`, `bar_start_ts`, `open`, `high`,
-`low`, `close`, `tick_count`, `is_closed`, and `last_update_ts`.
+Every bar record SHALL carry `provider`, `symbol`, `side`, `timeframe`, `bar_start_ts`, `open`,
+`high`, `low`, `close`, `tick_count`, `is_closed`, and `last_update_ts`.
 
 #### Scenario: Aggregation service publishes a bar update
 - **WHEN** a bar update (intrabar or closed) is published to a bar stream
-- **THEN** the record includes `provider`, `symbol`, `timeframe`, `bar_start_ts`, `open`, `high`,
-  `low`, `close`, `tick_count`, `is_closed`, and `last_update_ts`
+- **THEN** the record includes `provider`, `symbol`, `side`, `timeframe`, `bar_start_ts`, `open`,
+  `high`, `low`, `close`, `tick_count`, `is_closed`, and `last_update_ts`
+
+### Requirement: Bar price side
+Every `Bar` record SHALL carry a `side` field whose value is either `bid` or `ask`. Each bar
+window SHALL produce exactly two records, one per side, with `open`, `high`, `low`, and `close`
+derived from that side's price on each contributing tick. No other `side` value SHALL be defined:
+a mid-price series is derivable by consumers and SHALL NOT be published as a third side.
+`tick_count` SHALL be identical on the two records for a window, since every tick carries both a
+bid and an ask.
+
+#### Scenario: A bar window is published
+- **WHEN** a bar update is published for a `(provider, symbol, timeframe, bar_start_ts)`
+- **THEN** two records are published, one with `side = bid` built from bid prices and one with
+  `side = ask` built from ask prices, carrying the same `tick_count`
+
+#### Scenario: A consumer wants a mid-price series
+- **WHEN** a consumer needs mid-price bars
+- **THEN** it derives them from the `bid` and `ask` records it receives, and no `side` value other
+  than `bid` or `ask` appears on the bus or in storage
+
+### Requirement: Bar identity and reconciliation key
+A bar SHALL be identified by `(provider, symbol, side, timeframe, bar_start_ts)`. Every consumer
+that persists, reconciles, or deduplicates bars SHALL key on that full tuple.
+
+#### Scenario: The same bar is delivered twice
+- **WHEN** a consumer receives two records with the same
+  `(provider, symbol, side, timeframe, bar_start_ts)` tuple
+- **THEN** it treats the second occurrence as the same bar, not as a second bar and not as the
+  window's other side
+
+#### Scenario: A consumer pairs the two sides of one window
+- **WHEN** a consumer needs the `bid` and `ask` records for one bar window together
+- **THEN** it pairs them on `(provider, symbol, timeframe, bar_start_ts)`, since read batching can
+  place the two records in different reads even though they are published together
 
 ### Requirement: Stream and key naming
 Raw ticks SHALL be published to `ticks.raw.{provider}.{symbol}`. Bar updates SHALL be published
 to `bars.{timeframe}.{provider}.{symbol}`. Aggregation checkpoints SHALL be stored under
-`bar_state:{provider}:{symbol}:{timeframe}`.
+`bar_state:{provider}:{symbol}:{timeframe}`. A bar stream SHALL carry both price sides: `side` is
+a field of the record and SHALL NOT be a segment of any stream or key name, so stream count, the
+trim policy, and checkpoint keying stay independent of the side dimension.
 
 #### Scenario: A new provider's adapter starts publishing
 - **WHEN** a feed adapter for a provider not previously active begins publishing ticks
 - **THEN** its ticks appear under `ticks.raw.{provider}.{symbol}` and a consumer that discovers
   raw-tick streams dynamically picks them up without a consumer-side configuration change
+
+#### Scenario: A consumer reads a bar stream
+- **WHEN** a consumer reads `bars.{timeframe}.{provider}.{symbol}`
+- **THEN** it receives both the `bid` and the `ask` record for each bar window, told apart by the
+  `side` field rather than by stream name
 
 ### Requirement: Provider tagging
 Every `Tick` and `Bar` record SHALL carry a non-empty `provider` field identifying which data

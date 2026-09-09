@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/mchiuminatto/tqtk-price-streaming/contracts/storage/v1/storage-contract.schema.json",
+  "title": "Storage contract",
+  "description": "The shape of a versioned table contract under contracts/storage/. A meta-schema, not a table definition: it constrains how ticks.v1.json and bars.v1.json are written so that the shared test fixture, the destructive-migration check, and a non-Python implementation can all read them without guessing. The tables themselves are created only by their owning service's migrations.",
+  "type": "object",
+  "required": [
+    "table",
+    "schema_version",
+    "owner",
+    "description",
+    "hypertable",
+    "columns",
+    "indexes"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": { "type": "string" },
+    "table": {
+      "description": "The table this contract describes.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$"
+    },
+    "schema_version": {
+      "description": "Incremented in the same change as any column addition. Each table has its own lineage: the two tables have independent owners and release cadences, so their versions do not move together.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "owner": {
+      "description": "The sole writer of this table's rows and of its DDL. No other service, and no platform bootstrap step, creates or alters it.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*$"
+    },
+    "description": { "type": "string", "minLength": 1 },
+    "hypertable": {
+      "description": "The TimescaleDB time dimension. Every unique index on the table must contain this column.",
+      "type": "object",
+      "required": ["time_column", "chunk_interval", "rationale"],
+      "additionalProperties": false,
+      "properties": {
+        "time_column": { "type": "string" },
+        "chunk_interval": { "type": "string" },
+        "rationale": { "type": "string", "minLength": 1 }
+      }
+    },
+    "columns": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["name", "type", "nullable"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+          "type": {
+            "description": "A PostgreSQL type. Prices are double precision and timestamps are timestamptz; no column is JSONB, so every field stays visible to information_schema and to per-column compression.",
+            "enum": ["text", "double precision", "bigint", "integer", "boolean", "timestamptz"]
+          },
+          "nullable": {
+            "description": "A column added in a later version of this lineage must be nullable or carry a default, so a reader built against an earlier version keeps working.",
+            "type": "boolean"
+          },
+          "default": {
+            "description": "A SQL default expression. A column added in a later version of this lineage must be nullable or carry one of these, so a reader built against an earlier version keeps working; the additive-only check enforces exactly that pair.",
+            "type": "string",
+            "minLength": 1
+          },
+          "wire_field": {
+            "description": "The field of the corresponding wire record this column stores. Present on every column that has one, which is what lets a test hold the two contract surfaces together.",
+            "type": "string"
+          },
+          "description": { "type": "string" }
+        }
+      }
+    },
+    "primary_key": {
+      "description": "Null where the table has none: on a hypertable a primary key must contain the partitioning column, which is not always the key the domain wants.",
+      "type": ["array", "null"],
+      "items": { "type": "string" },
+      "minItems": 1
+    },
+    "indexes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["name", "columns", "unique"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+          "columns": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+          "unique": { "type": "boolean" },
+          "description": { "type": "string" }
+        }
+      }
+    },
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "expression"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+          "expression": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "notes": { "type": "array", "items": { "type": "string" } }
+  }
+}

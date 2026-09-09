@@ -1,0 +1,13 @@
+{
+  "provider": "synthetic",
+  "symbol": "EURUSD",
+  "provider_symbol": "EUR/USD",
+  "provider_ts": 1788523200123000,
+  "recv_ts": 1788523200123412,
+  "bid": 1.17042,
+  "ask": 1.17048,
+  "bid_size": 1.5,
+  "ask_size": 2.25,
+  "session_id": "01J9Z6XK7Q8V3N2M4P5R6S7T8U",
+  "seq": 41337
+}

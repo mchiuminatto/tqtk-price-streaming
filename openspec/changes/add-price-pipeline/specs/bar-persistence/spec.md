@@ -21,15 +21,35 @@ for an intrabar (forming) update.
 - **THEN** the bar-persistence service does not write a row for it
 
 ### Requirement: Idempotent upsert
-The service SHALL upsert bar rows keyed on `(provider, symbol, timeframe, bar_start_ts)`, so a
-repeated delivery of the same closed bar overwrites the existing row rather than creating a
+The service SHALL upsert bar rows keyed on `(provider, symbol, side, timeframe, bar_start_ts)`, so
+a repeated delivery of the same closed bar overwrites the existing row rather than creating a
 duplicate.
 
 #### Scenario: The same closed bar is delivered twice
-- **WHEN** the same closed bar (identified by `provider`, `symbol`, `timeframe`, `bar_start_ts`)
-  is delivered more than once — e.g. re-emitted after a crash recovery
+- **WHEN** the same closed bar (identified by `provider`, `symbol`, `side`, `timeframe`,
+  `bar_start_ts`) is delivered more than once — e.g. re-emitted after a crash recovery
 - **THEN** the stored row is overwritten in place, and no duplicate row or doubled `tick_count`
   results
+
+#### Scenario: Both sides of one window are stored
+- **WHEN** the `bid` and `ask` records for one bar window are persisted
+- **THEN** they occupy two distinct rows, told apart only by `side`, and neither overwrites the
+  other
+
+### Requirement: Both sides of a window written in one transaction
+The two side-rows for one `(provider, symbol, timeframe, bar_start_ts)` SHALL be written within a
+single transaction, so a reader never observes a window with one side stored and the other
+missing.
+
+#### Scenario: A reader queries during a batch write
+- **WHEN** a read-side consumer queries `bars` while a batch containing both sides of a window is
+  being written
+- **THEN** it sees either both side-rows for that window or neither, never one alone
+
+#### Scenario: The write fails partway
+- **WHEN** the database rejects or the connection drops midway through writing a window's rows
+- **THEN** neither side-row is committed, and the closed bars remain unacknowledged on the bus for
+  a later retry
 
 ### Requirement: Consumer-group horizontal scaling
 The service SHALL scale horizontally via Redis consumer groups such that each closed bar is

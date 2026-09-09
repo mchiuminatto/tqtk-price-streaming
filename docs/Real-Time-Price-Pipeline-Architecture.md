@@ -40,11 +40,11 @@
 |---|---|---|---|---|---|
 | **feed-adapter-synthetic** | Generate configurable-rate synthetic ticks; tag `provider="synthetic"`; publish raw ticks only | None | Redis stream `ticks.raw.synthetic.{symbol}` | Internal generator, no external dependency | One instance |
 | **feed-adapter-dukascopy** *(Phase 2 — planned, not built)* | Connect to Dukascopy (JForex, Java); normalize + tag `provider="dukascopy"`; publish raw ticks only | None | Redis stream `ticks.raw.dukascopy.{symbol}` | Dukascopy feed (external) | One instance (single provider session) |
-| **aggregation-svc** | Discover and consume raw-tick streams across **all active** providers; maintain live OHLCV bar state per `(provider, symbol, timeframe)`; checkpoint for crash recovery | None persistent (in-memory + Redis checkpoint) | Redis streams `bars.{tf}.{provider}.{symbol}`; checkpoint key `bar_state:{provider}:{symbol}` | Redis stream `ticks.raw.*` (all providers, dynamically discovered) | Single shared instance to start; shardable by symbol or provider later if measurement shows it's needed |
+| **aggregation-svc** | Discover and consume raw-tick streams across **all active** providers; maintain live OHLCV bar state per `(provider, symbol, timeframe)` on both price sides (`bid`/`ask`); checkpoint for crash recovery | None persistent (in-memory + Redis checkpoint) | Redis streams `bars.{tf}.{provider}.{symbol}` (both sides, `side` in the record); checkpoint key `bar_state:{provider}:{symbol}:{tf}` | Redis stream `ticks.raw.*` (all providers, dynamically discovered) | Single shared instance to start; shardable by symbol or provider later if measurement shows it's needed |
 | **tick-persistence-svc** | Discover and consume raw-tick streams across all providers, batch-write durably | `ticks` table — sole writer of both its rows and its DDL/migrations | — | Redis streams `ticks.raw.*` | Horizontal via consumer groups |
 | **bar-persistence-svc** | Discover and consume closed-bar streams across all providers, batch-write durably | `bars` table — sole writer of both its rows and its DDL/migrations | — | Redis streams `bars.*.*`, closed only | Horizontal via consumer groups |
-| **streaming-gateway-svc** | Relay live ticks/bars to LAN consumers over WebSocket, filterable by provider; slow-consumer policy | None | WebSocket API | Redis streams (all providers) | Horizontal; sticky routing beyond 1 instance (not yet) |
-| **historical-query-svc** | Stateless REST for historical queries/backfill, filterable by provider | None — declared read-side consumer bound to a storage `schema_version` | REST API | PostgreSQL (read-only) | Horizontal, stateless |
+| **streaming-gateway-svc** | Relay live ticks/bars to LAN consumers over WebSocket, filterable by provider/symbol/timeframe and optionally side; slow-consumer policy | None | WebSocket API | Redis streams (all providers) | Horizontal; sticky routing beyond 1 instance (not yet) |
+| **historical-query-svc** | Stateless REST for historical queries/backfill, filterable by provider and, for bars, side | None — declared read-side consumer bound to a storage `schema_version` | REST API | PostgreSQL (read-only) | Horizontal, stateless |
 | **edge-gateway** *(not in scope — deferred with decision #9)* | Would be a single LAN-facing entrypoint (TLS, routing, rate limiting) if the trust boundary ever changes; not built now | None | HTTPS / WSS | streaming-gateway-svc, historical-query-svc | Horizontal, stateless |
 
 Platform components: Redis (bus + checkpoint store), PostgreSQL + TimescaleDB (system of record — the server and extension only; the `ticks` and `bars` tables are created by their owning services' migrations, not by platform bootstrap).
@@ -118,15 +118,17 @@ The previous version of this design combined feed handling and aggregation into 
 ```
 Tick:  { provider, symbol, provider_symbol?, provider_ts, recv_ts, bid, ask,
          bid_size?, ask_size?, session_id, seq }
-Bar:   { provider, symbol, timeframe, bar_start_ts, open, high, low, close,
-         tick_count, is_closed, last_update_ts }
+Bar:   { provider, symbol, side, timeframe, bar_start_ts, open, high, low, close,
+         tick_count, is_closed, last_update_ts }        side = "bid" | "ask"
 ```
 
-Redis streams: `ticks.raw.{provider}.{symbol}`, `bars.{timeframe}.{provider}.{symbol}`. Postgres/TimescaleDB: `ticks` hypertable indexed on `(provider, symbol, ts)`; `bars` hypertable indexed on `(provider, symbol, timeframe, bar_start_ts)`.
+Redis streams: `ticks.raw.{provider}.{symbol}`, `bars.{timeframe}.{provider}.{symbol}`. Postgres/TimescaleDB: `ticks` hypertable indexed on `(provider, symbol, recv_ts)`, partitioned on `recv_ts`; `bars` hypertable indexed on `(provider, symbol, side, timeframe, bar_start_ts)`, prices as typed `double precision` columns.
+
+**The bid/ask side dimension.** A bar is a bid series or an ask series — there is no single "the price" for an FX window — so every window produces **two** records, `side = "bid"` and `side = "ask"`, built from that side's price on each contributing tick, with identical `tick_count`. `side` is a field of the record, deliberately **not** a segment of the stream name: bar streams carry both sides (stream count stays 104, and the trim policy and checkpoint keys are untouched), while the aggregation actor stays keyed `(provider, symbol, timeframe)` and holds both side-bars, publishing the pair in one atomic bus operation. There is no `mid` side — consumers derive it. The split doubles LAN bar-message volume to **~6,240 msgs/sec** and persisted bar rows to **~27/sec (~2.3M/day)**; ticks are unaffected, since a `Tick` already carried both sides.
 
 ### Two contract surfaces, both versioned
 
-The `Tick`/`Bar` records above are the **wire contract** — defined language-neutrally (JSON Schema or `.proto`) so a future Java adapter conforms without importing the Python package. The `ticks`/`bars` table schema is a **second contract surface**, and gets the same treatment rather than being left as whatever DDL happens to have been applied:
+The `Tick`/`Bar` records above are the **wire contract** — defined language-neutrally in JSON Schema (draft 2020-12, under `contracts/wire/`) so a future Java adapter conforms without importing the Python package. JSON Schema rather than `.proto` because the bus carries Redis field maps, not a binary protocol: protobuf's codegen would buy little and would add `protoc` to both the Python and the Java build. The `ticks`/`bars` table schema is a **second contract surface**, and gets the same treatment rather than being left as whatever DDL happens to have been applied:
 
 - **Versioned artifact.** The table schema carries an explicit `schema_version` and lives beside the wire schema, not only in the database.
 - **DDL ownership follows sole-writer ownership.** `tick-persistence-svc` owns the `ticks` schema; `bar-persistence-svc` owns `bars`. Each applies its own migrations on startup, under a Postgres advisory lock so concurrent instances migrate exactly once. Nothing is created by platform bootstrap or by an out-of-band manual step.
@@ -194,7 +196,7 @@ The <10ms budget rules out anything that adds a network hop or blocking call ins
 | Service | Key metrics |
 |---|---|
 | **feed-adapter-{provider}** | `ticks_published_total` (counter, by provider/symbol); `publish_latency_ms` (histogram, recv_ts → XADD complete); `feed_connection_status` (gauge, 0/1); `feed_reconnects_total` (counter) |
-| **aggregation-svc** | **`tick_to_bar_latency_ms`** (histogram, `now() − recv_ts` at bar XADD — the direct <10ms SLA measurement, by provider/symbol/timeframe); `ticks_consumed_total`; `consumer_lag` (gauge, from stream length vs. last-delivered ID); `checkpoint_duration_ms`; `aggregation_errors_total` |
+| **aggregation-svc** | **`tick_to_bar_latency_ms`** (histogram, `now() − recv_ts` at bar XADD — the direct <10ms SLA measurement, by provider/symbol/timeframe; no `side` label, since a window's two side-records publish in one operation); `ticks_consumed_total`; `consumer_lag` (gauge, from stream length vs. last-delivered ID); `checkpoint_duration_ms`; `aggregation_errors_total` |
 | **tick-persistence-svc / bar-persistence-svc** | `batch_write_duration_ms` (histogram); `batch_size` (histogram); `write_errors_total`; `consumer_lag` |
 | **streaming-gateway-svc** | `connected_clients` (gauge); `messages_relayed_total`; `slow_consumer_drops_total` |
 | **historical-query-svc** | `request_duration_ms` (histogram); `request_errors_total` |

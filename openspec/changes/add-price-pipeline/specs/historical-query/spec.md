@@ -27,13 +27,18 @@ Queries SHALL accept a `provider` filter, restricting results to that provider's
 - **WHEN** a client queries with a `provider` filter
 - **THEN** only rows tagged with that `provider` are returned
 
-### Requirement: Filterable by symbol, timeframe, and time range
-Bar queries SHALL accept `symbol`, `timeframe`, and a time-range filter (start/end); tick queries
-SHALL accept `symbol` and a time-range filter.
+### Requirement: Filterable by symbol, side, timeframe, and time range
+Bar queries SHALL accept `symbol`, `timeframe`, an optional `side`, and a time-range filter
+(start/end); tick queries SHALL accept `symbol` and a time-range filter. Omitting `side` SHALL
+return both sides rather than defaulting to one.
 
 #### Scenario: Client requests a historical range
 - **WHEN** a client queries bars for a `(provider, symbol, timeframe)` with a start/end time range
 - **THEN** only bars whose `bar_start_ts` falls within that range are returned
+
+#### Scenario: Client filters by side
+- **WHEN** a client queries bars with `side = bid`
+- **THEN** only `bid` rows are returned, and a query omitting `side` returns both sides
 
 ### Requirement: Stateless horizontal scaling
 Any running instance SHALL be able to serve any request; the service SHALL require no session

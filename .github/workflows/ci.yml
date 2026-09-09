@@ -77,6 +77,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The additive-only check compares each storage contract against the same file at the
+          # base commit, so a shallow clone would leave it with nothing to compare.
+          fetch-depth: 0
 
       - uses: astral-sh/setup-uv@v5
         with:
@@ -91,6 +95,25 @@ jobs:
 
       - name: Test the path-filter rules
         run: uv run --frozen pytest tools/ci -q
+
+      # The contracts belong to no member, so the matrix never covers them. The
+      # container-backed storage tests live with tqtk-common and are deselected here; they run
+      # once task 4.2 provides the Compose stack.
+      - name: Validate the contracts
+        run: uv run --frozen pytest contracts -q -m "not integration"
+
+      # A dropped, renamed or narrowed column reaches this before it reaches a database.
+      - name: Check storage contracts evolve additively
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          base="${BASE_SHA:-}"
+          if [ -z "$base" ] || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            base="origin/${{ github.event.repository.default_branch }}"
+          fi
+          echo "Comparing released versions against $base"
+          uv run --frozen python tools/ci/additive_only.py --base "$base"
 
   # One build/test job per affected member. `fail-fast: false` so one service's
   # failure does not mask another's.

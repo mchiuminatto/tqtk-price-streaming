@@ -10,29 +10,31 @@
 
 ## 2. Data contract (`data-contract` spec)
 
-- [ ] 2.1 Write the language-neutral `Tick`/`Bar` schema (JSON Schema or `.proto`) outside
-      `tqtk-common`, as the authority both Python and a future Java adapter implement; verify a
-      sample `Tick` and `Bar` record validate against it.
-- [ ] 2.2 Implement `Tick`/`Bar` Python models in `tqtk-common` conforming to the schema; verify a
+- [x] 2.1 Write the language-neutral `Tick`/`Bar` schema (JSON Schema or `.proto`) outside
+      `tqtk-common`, as the authority both Python and a future Java adapter implement, with `Bar`
+      carrying `side` (`bid` | `ask`, closed enum); verify a sample `Tick` and a sample `Bar` of
+      each side validate against it, and a third `side` value is rejected.
+- [x] 2.2 Implement `Tick`/`Bar` Python models in `tqtk-common` conforming to the schema; verify a
       unit test round-trips serialize/deserialize without data loss.
-- [ ] 2.3 Implement stream/key-name builders (`ticks.raw.{provider}.{symbol}`,
+- [x] 2.3 Implement stream/key-name builders (`ticks.raw.{provider}.{symbol}`,
       `bars.{tf}.{provider}.{symbol}`, `bar_state:{provider}:{symbol}:{tf}`) in `tqtk-common`;
       verify unit tests cover each naming pattern.
-- [ ] 2.4 Implement `seq`/`session_id` generation (per-`(provider,symbol)` counter reset to 0 per
+- [x] 2.4 Implement `seq`/`session_id` generation (per-`(provider,symbol)` counter reset to 0 per
       session, paired `session_id`) in `tqtk-common`; verify a unit test confirms reset-on-new-session
       and gapless monotonic increment within a session.
-- [ ] 2.5 Implement the consumer-side gap-detection/dedup helper keyed on
+- [x] 2.5 Implement the consumer-side gap-detection/dedup helper keyed on
       `(provider, symbol, session_id, seq)` in `tqtk-common`; verify unit tests cover: an in-session
       gap (flagged), a session change (not flagged as loss), and a duplicate delivery (deduped).
-- [ ] 2.6 Write the versioned storage schema contract artifact for the `ticks` and `bars` tables
-      (columns, types, indexes, `schema_version`), alongside the wire schema from task 2.1; verify
+- [x] 2.6 Write the versioned storage schema contract artifact for the `ticks` and `bars` tables
+      (columns, types, indexes, `schema_version`), alongside the wire schema from task 2.1, with
+      `bars` carrying `side` as a typed column and prices as `double precision` (no JSONB); verify
       a fixture database built from it matches the data model's documented indexes
-      (`(provider, symbol, ts)` and `(provider, symbol, timeframe, bar_start_ts)`).
-- [ ] 2.7 Implement the shared storage-contract test fixture in `tqtk-common` — builds a schema at a
+      (`(provider, symbol, recv_ts)` and `(provider, symbol, side, timeframe, bar_start_ts)`).
+- [x] 2.7 Implement the shared storage-contract test fixture in `tqtk-common` — builds a schema at a
       given `schema_version` from the contract artifact, for use by both writer and reader contract
       tests; verify it produces a schema a plain `SELECT` of every contracted column succeeds
       against.
-- [ ] 2.8 Add a CI check that fails on a destructive migration against `ticks` or `bars` (`DROP`
+- [x] 2.8 Add a CI check that fails on a destructive migration against `ticks` or `bars` (`DROP`
       COLUMN, `RENAME`, or type-narrowing) within a released `schema_version` lineage; verify it
       passes on an added nullable column and fails on a dropped one.
 
@@ -83,25 +85,31 @@
       tick into that symbol's 8 in-process timeframe mailboxes; verify a test tick reaches all 8
       mailboxes for its symbol.
 - [ ] 6.2 Implement the per-`(provider,symbol,timeframe)` actor with `recv_ts`-based event-time
-      bucketing; verify a unit test correctly buckets ticks delivered out of `recv_ts` order.
+      bucketing, holding both side-bars (the tick's `bid` folding into the `bid` bar, its `ask`
+      into the `ask` bar); verify a unit test correctly buckets ticks delivered out of `recv_ts`
+      order, and that one tick updates both sides with a single shared `tick_count`.
 - [ ] 6.3 Implement the wheel timer posting grace-delayed close events (`T+tf+grace`) into each
       actor's mailbox; verify a test confirms a bar with no boundary tick still closes at
       `T+tf+grace`, and an in-flight tick with `recv_ts < T+tf` arriving before `T+tf+grace` is
       still folded in.
-- [ ] 6.4 Implement `Open` semantics — first in-window tick's price for non-idle bars;
-      `Open=High=Low=Close=`previous `Close` with `tick_count=0` for idle bars; verify unit tests
-      for both cases.
+- [ ] 6.4 Implement `Open` semantics per side — the first in-window tick's price *for that side*
+      for non-idle bars; `Open=High=Low=Close=` that side's previous `Close` with `tick_count=0`
+      for idle bars; verify unit tests for both cases on both sides.
 - [ ] 6.5 Implement late-tick drop-and-count (`late_ticks_total{provider,symbol,timeframe}`);
       verify a tick arriving after its bar's close increments the metric and is not folded into
       any bar.
-- [ ] 6.6 Implement checkpoint writes (`O/H/L/C` + `tick_count` + `bar_start_ts` + last-consumed
-      stream ID) on every bar close and at least every ~1 s while forming; verify the checkpoint
-      after a close carries a stream ID at or past the last tick folded into that bar.
+- [ ] 6.6 Implement checkpoint writes (both sides' `O/H/L/C` + the shared `tick_count` +
+      `bar_start_ts` + last-consumed stream ID, under the unchanged
+      `bar_state:{provider}:{symbol}:{tf}` key) on every bar close and at least every ~1 s while
+      forming; verify the checkpoint after a close carries a stream ID at or past the last tick
+      folded into that bar, and recovers both sides.
 - [ ] 6.7 Implement crash recovery — resume `XREAD` from the checkpointed stream ID on restart;
       verify an integration test that kills and restarts the service mid-stream does not
       reprocess already-checkpointed closed bars.
 - [ ] 6.8 Publish bar updates (intrabar and closed) to `bars.{tf}.{provider}.{symbol}` per the
-      `Bar` schema; verify a consumer receives well-formed records for both update types.
+      `Bar` schema, emitting a window's `bid` and `ask` records in a single atomic bus operation;
+      verify a consumer receives well-formed records for both update types on both sides, and that
+      the pair lands with adjacent stream IDs with no publish visible between them.
 - [ ] 6.9 Instrument the `tick_to_bar_latency_ms` histogram at publish time, labeled by
       `provider`/`symbol`/`timeframe`; verify it is observable on `/metrics` and its measured p95
       stays under the 10 ms budget in a local load test.
@@ -135,24 +143,29 @@
 - [ ] 8.3 Implement consumer-group-based batch consumption of `bars.*.*` filtered to
       `is_closed=true`, writing to the `bars` table as sole writer; verify an intrabar update
       never produces a row.
-- [ ] 8.4 Implement idempotent upsert keyed on `(provider, symbol, timeframe, bar_start_ts)`;
-      verify replaying the same closed bar twice results in exactly one row with an unchanged
-      `tick_count`, not a duplicate.
+- [ ] 8.4 Implement idempotent upsert keyed on
+      `(provider, symbol, side, timeframe, bar_start_ts)`, writing a window's two side-rows in one
+      transaction; verify replaying the same closed bar twice results in exactly one row with an
+      unchanged `tick_count`, that the two sides occupy distinct rows, and that a failure partway
+      through commits neither.
 - [ ] 8.5 Verify outage buffering for closed bars, matching task 7.5's pattern.
 
 ## 9. streaming-gateway-svc (`streaming-gateway` spec)
 
 - [ ] 9.1 Implement the WebSocket relay of live ticks/bars with `provider`/`symbol`/`timeframe`
-      subscription filtering; verify a subscribed client receives only matching updates.
-- [ ] 9.2 Implement the slow-consumer policy (conflate-latest-per-key, then drop beyond a
-      backlog bound); verify a simulated slow client's queue stays bounded and it receives the
-      latest value per key rather than every intermediate update.
+      subscription filtering plus an optional `side` filter; verify a subscribed client receives
+      only matching updates, and that omitting `side` delivers both sides.
+- [ ] 9.2 Implement the slow-consumer policy (conflate-latest-per-key on
+      `(provider, symbol, side, timeframe)`, then drop beyond a backlog bound); verify a simulated
+      slow client's queue stays bounded, it receives the latest value per key rather than every
+      intermediate update, and conflation never drops one side in favour of the other.
 - [ ] 9.3 Bind to a LAN-reachable interface (configurable, not localhost-only); verify a
       connection from another host (or network namespace) on the test LAN succeeds.
-- [ ] 9.4 Implement `GET /snapshot` (`N-1` closed bars from `historical-query-svc` + 1 in-memory
-      forming bar, stitched and reconciled on `(provider,symbol,timeframe,bar_start_ts)`); verify
-      a snapshot response is ordered, gapless, and its newest closed bar is time-adjacent to the
-      forming bar.
+- [ ] 9.4 Implement `GET /snapshot` with `side` required (`N-1` closed bars from
+      `historical-query-svc` + 1 in-memory forming bar, stitched and reconciled on
+      `(provider,symbol,side,timeframe,bar_start_ts)`); verify a snapshot response is ordered,
+      gapless, single-sided, its newest closed bar time-adjacent to the forming bar, and that a
+      request omitting `side` is rejected.
 - [ ] 9.5 Verify the snapshot-then-subscribe flow: request a snapshot, then open a subscription,
       and confirm no duplicate or missing update for the bar in progress at connect time.
 - [ ] 9.6 Verify no authentication is required to connect or subscribe, per Phase-1 scope.
@@ -160,8 +173,9 @@
 ## 10. historical-query-svc (`historical-query` spec)
 
 - [ ] 10.1 Implement read-only REST endpoints over `ticks`/`bars`, filterable by `provider`,
-      `symbol`, `timeframe`, and time range; verify (via code review or an integration test) that
-      no write query ever executes.
+      `symbol`, `timeframe`, time range, and — for bars — an optional `side`; verify (via code
+      review or an integration test) that no write query ever executes, and that omitting `side`
+      returns both sides.
 - [ ] 10.2 Verify bar endpoints return only `is_closed=true` rows.
 - [ ] 10.3 Verify stateless scaling: run two instances behind a load balancer and confirm
       identical responses to the same query regardless of which instance served a prior request.

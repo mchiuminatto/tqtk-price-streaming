@@ -37,6 +37,25 @@ Java adapter conforms to the same contract without depending on `tqtk-common`. *
 rejected**: let the Python types be the de facto contract — works until Phase 2, then forces a
 retrofit onto a component that was never designed against a neutral spec.
 
+### Contract records are pydantic models, and the schema files stay the authority
+`tqtk-common` models `Tick`/`Bar` as frozen pydantic v2 models validating at construction, so a
+record that breaks an invariant cannot reach the bus. Lax-mode coercion also turns the flat string
+map a Redis stream entry carries back into typed fields in one call. **Alternative rejected**:
+stdlib dataclasses — keeps the shared library dependency-free, but needs a hand-written parse table
+per record to redo what coercion does natively, and reports only the first violation rather than
+all of them.
+
+The authority runs one way only: `contracts/wire/*.schema.json` is the contract and the models
+conform to it. **Alternative rejected**: generating the schema from `model_json_schema()` — it
+removes the duplicated field list, but makes the Java adapter conform to a Python artifact, which
+is the single property `contracts/` living outside `tqtk-common` exists to preserve. **Alternative
+rejected**: generating the models from the schema — the authority direction is right, but it adds a
+codegen step that produces only the field list, while the invariants JSON Schema cannot express and
+the helpers keyed on them (`Tick.price(side)`, `Bar.identity`, `Bar.window_key`) still have to be
+written by hand. The duplication that remains is held by a test asserting the model's field names
+and required set equal the schema's, so drift fails CI rather than depending on anyone remembering
+both files.
+
 ### Persisted schema is a versioned contract, not an implicit shared surface
 `historical-query-svc` reads the `ticks` and `bars` tables that `tick-persistence-svc` and
 `bar-persistence-svc` own — a CQRS read model, which is a legitimate pattern, but one that was
@@ -54,6 +73,49 @@ versioned contract doesn't already provide. **Alternative rejected**: leave the 
 rely on review discipline — the rule that isn't enforced is the one that breaks during the first
 refactor under time pressure, which is why the additive-only rule gets a CI check rather than a
 paragraph.
+
+### Bid/ask carried as two side-discriminated `Bar` records
+A bar is a bid series or an ask series; there is no single "the price" for an FX window. `Bar`
+therefore carries `side` (`bid` | `ask`), and every window produces two records identified by
+`(provider, symbol, side, timeframe, bar_start_ts)` — the tuple persistence upserts on and the
+gateway reconciles on. `tick_count` is identical on the pair, since one tick carries both sides.
+The `Tick` surface is unchanged: it already carries `bid` and `ask`, and is the source both bars
+are folded from. **Alternative rejected**: one wide record with `bid_open`..`ask_close` — halves
+message count, but stops `side` being a subscription and query dimension and forces every
+consumer, including charting clients that expect one OHLC per record, to project. **Alternative
+rejected**: a third `mid` side — derivable by consumers, and an enum member added later is a
+runtime surprise for anything that switches on `side`, so the enum is closed at two.
+
+### `side` lives in the record, not in the stream name or the actor key
+Streams stay `bars.{tf}.{provider}.{symbol}` and actors stay keyed
+`(provider, symbol, timeframe)`. **Alternative rejected**: `bars.{tf}.{provider}.{symbol}.{side}` —
+doubles stream count (104 → 208) and the janitor's trim bookkeeping to serve a filtering need only
+external clients have, and they are already filtered at the gateway subscription, not on the raw
+stream. **Alternative rejected**: `side` in the actor key — doubles actors and wheel-timer entries
+for no isolation, since both sides derive from the same tick and close on the same boundary. One
+actor holding both sides also keeps `bar_state:{provider}:{symbol}:{tf}` unchanged, with two O/H/L/C
+sets in the checkpoint payload, and lets the pair be published in one atomic bus operation so no
+consumer sees a window with one side advanced past the other. That guarantee stops at emission:
+a batched read can still split the pair, so consumers pair on the bar's identity rather than
+assuming co-delivery.
+
+### Bar sides stored as two typed rows, not one row with a JSONB price document
+`bars` gains a `side` column, its key and index become
+`(provider, symbol, side, timeframe, bar_start_ts)`, and prices stay `double precision` columns.
+**Alternative rejected**: one row per window holding `{bid: {...}, ask: {...}}` as JSONB. It moves
+the schema out of `information_schema`, where the whole versioned-storage-contract decision above
+just put it — the shared fixture has no columns to `SELECT`, and the additive-only CI check cannot
+see a key renamed inside a document, because that is an application-code edit rather than DDL. It
+also forfeits Timescale's type-aware compression (Gorilla on float columns, delta-delta on
+timestamps and counters, dictionary on the low-cardinality `provider`/`symbol`/`side`/`timeframe`
+columns) on a table taking ~2.3M rows/day, in exchange for repeating the JSON key names in every
+row. The usual argument for JSONB — that adding a column is slow or political — is one this design
+already answered: additive migration owned by the sole writer, verified in CI. **Alternative
+rejected**: one row with eight typed price columns — keeps every enforcement property and halves
+row count, but the storage shape then stops mirroring the wire shape, adding a fold in
+`bar-persistence` and its inverse in `historical-query` for a row rate (~27/s) that is not a
+pressure. JSONB stays the right tool for a later `provider_meta` column: sparse, per-provider, and
+never filtered on.
 
 ### `feed-adapter-*` and `aggregation-svc` stay separate processes
 A combined single process would save ~1-2 ms of network-hop latency, comfortably possible today
@@ -176,11 +238,19 @@ outgrows the built-in engine (e.g. multiple notification channels with routing r
 - **The hard-cap backstop trims data a slow-but-alive consumer hasn't read.** → Mitigation: only
   engages past `N` (sized to the resiliency target) and always raises a Critical alert — the loss
   is bounded to that one consumer and never silent.
-- **13 symbols (vs. the originally-estimated 6) roughly doubles LAN bar-message volume
-  (~3,120 msgs/sec) and Redis memory (4.3-5.4 GB/24h).** → Mitigation: the streaming-gateway
+- **13 symbols (vs. the originally-estimated 6) roughly doubles LAN bar-message volume, and the
+  bid/ask split doubles it again to ~6,240 msgs/sec, with the bar share of Redis memory (total
+  4.3-5.4 GB/24h before the split) doubling alongside it.** → Mitigation: the streaming-gateway
   slow-consumer conflation policy already absorbs the redundant long-timeframe churn driving that
-  volume (see `bar-aggregation`/`streaming-gateway` specs); sizing is budgeted up front rather
-  than discovered under load.
+  volume, and now conflates per side (see `bar-aggregation`/`streaming-gateway` specs); sizing is
+  budgeted up front rather than discovered under load. Tick volume and the `ticks` table are
+  unaffected — a tick already carried both sides.
+- **The bid/ask split doubles persisted bar rows.** Closed bars only:
+  `1 + 1/60 + 1/300 + 1/900 + 1/1800 + 1/3600 + 1/14400 + 1/86400 ≈ 1.022` closes/sec per
+  (symbol, side), × 13 symbols × 2 sides ≈ **~27 rows/sec ≈ 2.3M rows/day**. → Mitigation: typed
+  columns keep Timescale's per-column compression available (the reason the JSONB alternative was
+  rejected above); a compression/retention policy is not yet specified and is the lever if storage
+  growth becomes the binding constraint.
 - **The monorepo couples all six services' source history to one clone.** → Mitigation: each
   service still builds and deploys as an independent image; CI path-filtering keeps unrelated
   services from rebuilding on an unrelated change.

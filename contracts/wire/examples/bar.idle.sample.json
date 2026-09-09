@@ -1,0 +1,14 @@
+{
+  "provider": "synthetic",
+  "symbol": "USDCNH",
+  "side": "ask",
+  "timeframe": "1s",
+  "bar_start_ts": 1788523200000000,
+  "open": 7.1204,
+  "high": 7.1204,
+  "low": 7.1204,
+  "close": 7.1204,
+  "tick_count": 0,
+  "is_closed": true,
+  "last_update_ts": 1788523201000000
+}

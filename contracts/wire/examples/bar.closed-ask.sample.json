@@ -1,0 +1,14 @@
+{
+  "provider": "synthetic",
+  "symbol": "EURUSD",
+  "side": "ask",
+  "timeframe": "1m",
+  "bar_start_ts": 1788523200000000,
+  "open": 1.17048,
+  "high": 1.17067,
+  "low": 1.17039,
+  "close": 1.17061,
+  "tick_count": 318,
+  "is_closed": true,
+  "last_update_ts": 1788523259871004
+}

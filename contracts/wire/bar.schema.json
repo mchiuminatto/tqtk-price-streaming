@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/mchiuminatto/tqtk-price-streaming/contracts/wire/v1/bar.schema.json",
+  "title": "Bar",
+  "description": "One OHLCV bar state for one (provider, symbol, side, timeframe), as published to bars.{timeframe}.{provider}.{symbol}. Every bar window produces exactly two records, one per price side, published together; `side` is a field rather than a stream-name segment. Published on every intrabar update and once more at close; is_closed distinguishes the two. This file is the authority every implementation conforms to (tqtk-common in Python, a future Java adapter); neither is the contract itself. Timestamps are integer microseconds since the Unix epoch, UTC. Unknown fields are permitted so a producer can add a field before every consumer has adopted it.",
+  "type": "object",
+  "required": [
+    "provider",
+    "symbol",
+    "side",
+    "timeframe",
+    "bar_start_ts",
+    "open",
+    "high",
+    "low",
+    "close",
+    "tick_count",
+    "is_closed",
+    "last_update_ts"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "provider": {
+      "description": "Data source whose ticks this bar was built from. Appears verbatim in the stream name bars.{timeframe}.{provider}.{symbol}, so it may not contain the '.' or ':' used as separators. Bars from different providers are never blended.",
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]*$",
+      "minLength": 1,
+      "maxLength": 32,
+      "examples": [
+        "synthetic",
+        "dukascopy"
+      ]
+    },
+    "symbol": {
+      "description": "Canonical pipeline symbol, identical to the Tick field of the same name.",
+      "type": "string",
+      "pattern": "^[A-Z0-9]{2,20}$",
+      "examples": [
+        "EURUSD",
+        "GBPJPY"
+      ]
+    },
+    "side": {
+      "description": "Which price of the tick this bar's OHLC was built from. A bar is a bid series or an ask series: every window produces one record per side, carrying the same tick_count since every tick supplies both. The enum is closed at two \u2014 a mid-price series is derivable by consumers and is never published as a third side.",
+      "type": "string",
+      "enum": [
+        "bid",
+        "ask"
+      ]
+    },
+    "timeframe": {
+      "description": "Bar width. The eight timeframes are fixed by the bar-aggregation capability: every tick updates the forming bar on all of them, on both sides.",
+      "type": "string",
+      "enum": [
+        "1s",
+        "1m",
+        "5m",
+        "15m",
+        "30m",
+        "1h",
+        "4h",
+        "1D"
+      ]
+    },
+    "bar_start_ts": {
+      "description": "Inclusive start of the bar's window, in microseconds since the Unix epoch (UTC), aligned to the timeframe boundary. Buckets are computed from the tick's recv_ts (event time), not arrival order. Alignment is not expressible in JSON Schema and is asserted by the implementations. With (provider, symbol, side, timeframe) this is the bar's identity: bar-persistence upserts on that tuple, and a consumer pairs a window's two sides on it.",
+      "type": "integer",
+      "minimum": 0,
+      "examples": [
+        1756944000000000
+      ]
+    },
+    "open": {
+      "description": "First price folded into the window, on this record's side.",
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "examples": [
+        1.17042
+      ]
+    },
+    "high": {
+      "description": "Highest price folded into the window, on this record's side. Expected to be >= max(open, close) and >= low; the relations are not expressible in JSON Schema and are asserted by the implementations.",
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "examples": [
+        1.17061
+      ]
+    },
+    "low": {
+      "description": "Lowest price folded into the window, on this record's side. Expected to be <= min(open, close).",
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "examples": [
+        1.17033
+      ]
+    },
+    "close": {
+      "description": "Most recent price folded into the window, on this record's side: the last price for a closed bar, the current price for a forming one.",
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "examples": [
+        1.17055
+      ]
+    },
+    "tick_count": {
+      "description": "Ticks folded into the window so far, identical on the window's two side-records since every tick carries both a bid and an ask. 0 identifies an idle bar, carried forward as open = high = low = close = that same side's previous bar close, so that every series stays gapless.",
+      "type": "integer",
+      "minimum": 0,
+      "examples": [
+        0,
+        318
+      ]
+    },
+    "is_closed": {
+      "description": "false while the bar is still forming, true once its grace-delayed close has fired. Only closed bars are persisted; a consumer must not treat a forming bar as final.",
+      "type": "boolean"
+    },
+    "last_update_ts": {
+      "description": "recv_ts of the most recent tick folded into this bar, in microseconds since the Unix epoch (UTC). For an idle bar, the close event's own timestamp. Always >= bar_start_ts.",
+      "type": "integer",
+      "minimum": 0,
+      "examples": [
+        1756944000987654
+      ]
+    }
+  }
+}

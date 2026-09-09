@@ -1,0 +1,75 @@
+{
+  "$schema": "./storage-contract.schema.json",
+  "table": "bars",
+  "schema_version": 1,
+  "owner": "bar-persistence-svc",
+  "description": "Closed OHLCV bars as persisted, one row per (provider, symbol, side, timeframe, bar_start_ts). A window occupies two rows, one per price side, written in a single transaction. Written only by its owning service, which also owns this table's DDL and migrations; read by historical-query-svc as a declared read-side consumer. Evolution within this version lineage is additive only.",
+  "hypertable": {
+    "time_column": "bar_start_ts",
+    "chunk_interval": "7 days",
+    "rationale": "About 2.3M rows per day across all timeframes and both sides, so a week per chunk stays comfortable while keeping chunk exclusion useful for the range queries historical-query serves."
+  },
+  "columns": [
+    { "name": "provider", "type": "text", "nullable": false, "wire_field": "provider" },
+    { "name": "symbol", "type": "text", "nullable": false, "wire_field": "symbol" },
+    {
+      "name": "side",
+      "type": "text",
+      "nullable": false,
+      "wire_field": "side",
+      "description": "'bid' or 'ask'. A typed column rather than a key inside a JSONB price document, so the schema stays visible to information_schema, to the shared fixture, and to the destructive-migration check."
+    },
+    { "name": "timeframe", "type": "text", "nullable": false, "wire_field": "timeframe" },
+    {
+      "name": "bar_start_ts",
+      "type": "timestamptz",
+      "nullable": false,
+      "wire_field": "bar_start_ts",
+      "description": "The hypertable's time dimension, and part of the upsert key. Aligned to the timeframe boundary."
+    },
+    { "name": "open", "type": "double precision", "nullable": false, "wire_field": "open" },
+    { "name": "high", "type": "double precision", "nullable": false, "wire_field": "high" },
+    { "name": "low", "type": "double precision", "nullable": false, "wire_field": "low" },
+    { "name": "close", "type": "double precision", "nullable": false, "wire_field": "close" },
+    {
+      "name": "tick_count",
+      "type": "integer",
+      "nullable": false,
+      "wire_field": "tick_count",
+      "description": "Identical on a window's two side-rows; 0 marks an idle bar carried forward."
+    },
+    {
+      "name": "is_closed",
+      "type": "boolean",
+      "nullable": false,
+      "wire_field": "is_closed",
+      "description": "Always true in this table, since only closed bars are persisted. Kept as a column because the contract record carries it and historical-query filters on it explicitly; not constrained, because dropping a CHECK later would be a destructive change."
+    },
+    {
+      "name": "last_update_ts",
+      "type": "timestamptz",
+      "nullable": false,
+      "wire_field": "last_update_ts"
+    }
+  ],
+  "primary_key": ["provider", "symbol", "side", "timeframe", "bar_start_ts"],
+  "indexes": [
+    {
+      "name": "bars_provider_symbol_side_timeframe_bar_start_ts_idx",
+      "columns": ["provider", "symbol", "side", "timeframe", "bar_start_ts"],
+      "unique": true,
+      "description": "The documented access path and the idempotent-upsert key. Unique is legal here, unlike on ticks, because the tuple already contains the partitioning column."
+    }
+  ],
+  "checks": [
+    { "name": "bars_side_is_bid_or_ask", "expression": "side IN ('bid', 'ask')" },
+    {
+      "name": "bars_timeframe_is_contracted",
+      "expression": "timeframe IN ('1s', '1m', '5m', '15m', '30m', '1h', '4h', '1D')"
+    },
+    { "name": "bars_tick_count_non_negative", "expression": "tick_count >= 0" }
+  ],
+  "notes": [
+    "The upsert key and the index are the same tuple: bar-persistence upserts on conflict against it, so the unique index is what makes a redelivered closed bar overwrite in place rather than duplicate."
+  ]
+}

@@ -1,28 +1,47 @@
 ## Purpose
 
-Maintains live OHLCV bar state across all 8 timeframes for every active `(provider, symbol)`
-pair, publishing per-tick intrabar updates and time-driven bar closes within the internal latency
-budget, with per-actor crash recovery.
+Maintains live OHLCV bar state on both price sides across all 8 timeframes for every active
+`(provider, symbol)` pair, publishing per-tick intrabar updates and time-driven bar closes within
+the internal latency budget, with per-actor crash recovery.
 
 ## ADDED Requirements
 
 ### Requirement: Actor isolation
-The system SHALL maintain one independent actor per `(provider, symbol, timeframe)`. Processing
-for one timeframe of a symbol SHALL NOT block or delay processing for another timeframe of the
-same symbol.
+The system SHALL maintain one independent actor per `(provider, symbol, timeframe)`. That actor
+SHALL hold both of its window's side-bars, since both derive from the same tick and close on the
+same boundary; `side` SHALL NOT be part of the actor key. Processing for one timeframe of a symbol
+SHALL NOT block or delay processing for another timeframe of the same symbol.
 
 #### Scenario: A long-timeframe close overlaps a short-timeframe tick
 - **WHEN** a 1D bar close is being processed for a symbol
 - **THEN** concurrent 1s bar updates for the same symbol are not delayed by it
 
-### Requirement: Per-tick intrabar update across all timeframes
+### Requirement: Per-tick intrabar update across all timeframes and both sides
 Every tick SHALL update the forming bar's Open/High/Low/Close on all 8 configured timeframes
-(1s, 1m, 5m, 15m, 30m, 1h, 4h, 1D).
+(1s, 1m, 5m, 15m, 30m, 1h, 4h, 1D), on both sides: the tick's `bid` folds into the `bid` bar and
+its `ask` into the `ask` bar.
 
 #### Scenario: A tick arrives
 - **WHEN** a tick arrives for an active `(provider, symbol)`
-- **THEN** the forming bar for each of the 8 timeframes is updated and a bar update is published
-  for each timeframe
+- **THEN** the forming `bid` and `ask` bars for each of the 8 timeframes are updated and a bar
+  update is published for each side of each timeframe
+
+### Requirement: Paired side emission
+The two side-records for one `(provider, symbol, timeframe, bar_start_ts)` SHALL be published in a
+single atomic bus operation, so no consumer can observe one side of a window advanced past the
+other. Ordering guarantees SHALL NOT extend to consumption: a consumer reading in batches may
+receive the two records in different reads, and pairs them on the bar's identity per the
+`data-contract` capability.
+
+#### Scenario: A bar update is emitted
+- **WHEN** an update (intrabar or close) is emitted for a bar window
+- **THEN** its `bid` and `ask` records are published in one atomic operation, never as two
+  separately-visible publishes
+
+#### Scenario: A consumer reads a partial batch
+- **WHEN** a consumer's batched read returns one side's record without the other
+- **THEN** the missing side is not treated as a gap or a loss event; the consumer pairs on
+  `(provider, symbol, timeframe, bar_start_ts)` across reads
 
 ### Requirement: Event-time bucketing
 A tick SHALL be assigned to a bar window using its `recv_ts`, not its arrival order into
@@ -60,22 +79,23 @@ gapless.
 
 #### Scenario: A bar window has no ticks
 - **WHEN** a bar window closes having received zero ticks
-- **THEN** the emitted bar has `Open = High = Low = Close` equal to the previous bar's `Close`,
-  `tick_count = 0`, and `is_closed = true`
+- **THEN** each side's emitted bar has `Open = High = Low = Close` equal to that same side's
+  previous bar `Close`, with `tick_count = 0` and `is_closed = true`
 
 ### Requirement: `Open` semantics for non-idle bars
-For a bar window that receives at least one tick, `Open` SHALL be the price of the first tick
-whose `recv_ts` falls in that window.
+For a bar window that receives at least one tick, each side's `Open` SHALL be that side's price on
+the first tick whose `recv_ts` falls in that window.
 
 #### Scenario: First tick of a new bar window
 - **WHEN** the first tick with `recv_ts` in a new bar window arrives
-- **THEN** the bar's `Open` is set to that tick's price, overwriting any provisional `Open`
-  previously held for that window
+- **THEN** the `bid` bar's `Open` is set to that tick's `bid` and the `ask` bar's `Open` to its
+  `ask`, each overwriting any provisional `Open` previously held for that window
 
 ### Requirement: Checkpoint content and cadence
-Each actor SHALL checkpoint its forming bar's `Open/High/Low/Close`, `tick_count`,
-`bar_start_ts`, and the last-consumed tick stream ID: immediately on every bar close, and at
-least once per second while a bar is forming.
+Each actor SHALL checkpoint both sides' forming `Open/High/Low/Close`, the shared `tick_count`,
+`bar_start_ts`, and the last-consumed tick stream ID, under its single unchanged
+`bar_state:{provider}:{symbol}:{timeframe}` key: immediately on every bar close, and at least once
+per second while a bar is forming.
 
 #### Scenario: A bar closes
 - **WHEN** an actor closes a bar
@@ -84,8 +104,8 @@ least once per second while a bar is forming.
 
 #### Scenario: A bar is still forming after one second
 - **WHEN** one second elapses while a bar is still forming
-- **THEN** the actor's checkpoint is refreshed with the current `Open/High/Low/Close`,
-  `tick_count`, and last-consumed stream ID
+- **THEN** the actor's checkpoint is refreshed with both sides' current `Open/High/Low/Close`, the
+  `tick_count`, and the last-consumed stream ID
 
 ### Requirement: Crash recovery
 On restart, an actor SHALL resume consuming ticks from exactly the stream ID recorded in its

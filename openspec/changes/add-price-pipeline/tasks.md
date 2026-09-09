@@ -40,7 +40,7 @@
 
 ## 3. Service runtime contract (`service-runtime` spec)
 
-- [ ] 3.1 Implement `/health` and `/ready` endpoints in `tqtk-common`'s shared server, with
+- [x] 3.1 Implement `/health` and `/ready` endpoints in `tqtk-common`'s shared server, with
       `/ready` reflecting dependency-connection state distinct from process liveness; verify a
       service using it responds on `/health` immediately and on `/ready` only once dependencies
       (e.g. Redis) are connected.

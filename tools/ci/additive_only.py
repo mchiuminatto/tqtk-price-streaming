@@ -61,6 +61,25 @@ PROSE_KEYS: Final = frozenset({"description", "notes", "rationale", "$schema"})
 SAFE_WIDENINGS: Final = frozenset({("integer", "bigint")})
 
 
+class CheckCannotRun(Exception):
+    """Git could not answer something the check depends on.
+
+    Distinct from a violation, and deliberately not representable as one: a violation means the
+    artifacts were compared and found wanting, this means they were never compared at all. The
+    two share no exit code either - this is the 2 the module docstring reserves.
+    """
+
+
+def unreadable_at_ref(path: Path, ref: str) -> CheckCannotRun:
+    """`path` is listed at `ref`, but its content cannot be read there.
+
+    Not the "nothing to compare" that `at_ref` returns None for elsewhere: the listing already
+    proved the file is present at that ref, so failing to read it means this check is broken.
+    Skipping it would be the silent pass the whole script exists to prevent.
+    """
+    return CheckCannotRun(f"{path} is listed at {ref} but cannot be read there")
+
+
 @dataclass(frozen=True, order=True)
 class Violation:
     table: str
@@ -197,9 +216,11 @@ def artifact_paths_at_ref(ref: str, contracts_dir: Path, repo_root: Path) -> set
     """The artifacts that existed at `ref`, so a deletion is as visible as an edit.
 
     Empty when the contracts directory sits outside the repository, which is the case the tests
-    use: nothing there was ever released, so nothing there can be deleted. `contracts_dir` must
-    already be resolved - a relative or `..`-bearing path would not be recognised as inside the
-    repository, and the deletion check would quietly find nothing to compare.
+    use: nothing there was ever released, so nothing there can be deleted. That is the only
+    reading of an empty result - a failed listing raises instead, because returning the same
+    empty set for "nothing was released" and "git could not tell us" is what let a deleted
+    contract pass behind a success line. `contracts_dir` must already be resolved: a relative or
+    `..`-bearing path would not be recognised as inside the repository.
 
     `--full-name` rather than the default: `git ls-tree` reports paths relative to the working
     directory unless asked otherwise, so pinning them to the repository root is what makes
@@ -216,7 +237,10 @@ def artifact_paths_at_ref(ref: str, contracts_dir: Path, repo_root: Path) -> set
         check=False,
     )
     if result.returncode != 0:
-        return set()
+        raise CheckCannotRun(
+            f"git ls-tree failed for {relative.as_posix()} at {ref}: "
+            f"{result.stderr.strip() or 'no error output'}"
+        )
     return {
         repo_root / line
         for line in result.stdout.splitlines()
@@ -303,25 +327,27 @@ def main(argv: list[str] | None = None) -> int:
     repo_root = git_root(project_root)
 
     if repo_root is not None and ref_exists(args.base, repo_root):
-        for path in paths:
-            committed = at_ref(path, args.base, repo_root)
-            if committed is not None:
+        try:
+            # Listed first: both loops below need to know which artifacts existed at `base`, and
+            # it is what separates a file that is new from one that cannot be read.
+            released_paths = artifact_paths_at_ref(args.base, args.contracts_dir, repo_root)
+
+            for path in paths:
+                committed = at_ref(path, args.base, repo_root)
+                if committed is None:
+                    if path in released_paths:
+                        raise unreadable_at_ref(path, args.base)
+                    continue  # Genuinely new since `base`; there is no released version to edit.
                 violations.extend(check_immutability(committed, json.loads(path.read_text())))
-        released_paths = artifact_paths_at_ref(args.base, args.contracts_dir, repo_root)
-        for missing in sorted(released_paths - set(paths)):
-            released = at_ref(missing, args.base, repo_root)
-            if released is None:
-                # It was listed at `base` a moment ago, so failing to read it there is not the
-                # "nothing to compare" that `at_ref` returns None for elsewhere - it means this
-                # check is not working. Skipping it is how a deleted contract slips through
-                # behind a success line, which is the failure this whole check exists to prevent.
-                print(
-                    f"error: {missing} is listed at {args.base} but cannot be read there; "
-                    "the deletion check cannot run",
-                    file=sys.stderr,
-                )
-                return 2
-            violations.extend(check_deletion(released))
+
+            for missing in sorted(released_paths - set(paths)):
+                released = at_ref(missing, args.base, repo_root)
+                if released is None:
+                    raise unreadable_at_ref(missing, args.base)
+                violations.extend(check_deletion(released))
+        except CheckCannotRun as error:
+            print(f"error: {error}; the released-version check cannot run", file=sys.stderr)
+            return 2
     else:
         reason = (
             f"{project_root} is not inside a git repository"

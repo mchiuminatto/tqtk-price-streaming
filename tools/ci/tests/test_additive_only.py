@@ -314,21 +314,67 @@ def test_a_tree_vendored_below_the_repository_root_still_checks(
     assert "released version deleted" in deleted.stderr
 
 
-def test_an_unreadable_released_file_is_an_error_not_a_pass(released_repo: Path, monkeypatch):
-    """A path listed at the base ref that cannot be read there means the check is broken.
+def unlink_object(repo: Path, spec: str) -> None:
+    """Drop one object from the store, so git can still list it but no longer read it.
+
+    A degraded repository is the real condition these checks guard against - a corrupt store, or
+    a blobless partial clone run offline - so it is produced here rather than stubbed. Stubbing
+    `at_ref` would pin the branch that was written instead of the failure it guards, which is
+    how two of these silent passes survived the commit that was meant to remove them.
+    """
+    sha = subprocess.run(
+        ["git", "rev-parse", spec], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    (repo / ".git" / "objects" / sha[:2] / sha[2:]).unlink()
+
+
+def edit_a_released_contract(repo: Path) -> None:
+    storage = repo / "contracts" / STORAGE_DIRNAME
+    released = json.loads((storage / "ticks.v1.json").read_text())
+    released["columns"].append(column("venue"))
+    (storage / "ticks.v1.json").write_text(json.dumps(released))
+
+
+def test_an_unreadable_released_file_is_an_error_not_a_pass(released_repo: Path):
+    """A path listed at the base ref whose content cannot be read means the check is broken.
 
     Reporting nothing would be the exact failure this check exists to prevent, dressed as
     success - so it exits 2 ("could not run"), never 0.
     """
-    import tools.ci.additive_only as module
+    edit_a_released_contract(released_repo)
+    assert run_in(released_repo).returncode == 1, "control: the edit must be caught while readable"
 
+    unlink_object(released_repo, "HEAD:contracts/storage/ticks.v1.json")
+    result = run_in(released_repo)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "cannot be read there" in result.stderr
+
+
+def test_an_unlistable_ref_is_an_error_not_a_pass(released_repo: Path):
+    """The same rule one level up: a listing that fails is not a listing that is empty."""
     (released_repo / "contracts" / STORAGE_DIRNAME / "ticks.v1.json").unlink()
-    monkeypatch.setattr(module, "at_ref", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(
-        module, "artifact_paths_at_ref", lambda *_a, **_k: {released_repo / "gone.v1.json"}
+    assert run_in(released_repo).returncode == 1, "control: the deletion must be caught"
+
+    unlink_object(released_repo, "HEAD:contracts/storage")  # the tree, not a blob
+    result = run_in(released_repo)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "ls-tree" in result.stderr
+
+
+def test_a_file_new_since_the_base_ref_is_not_mistaken_for_an_unreadable_one(released_repo: Path):
+    """`at_ref` returns None for both; only the base-ref listing tells them apart.
+
+    Without this, tightening the unreadable case would reject every legitimately new version.
+    """
+    storage = released_repo / "contracts" / STORAGE_DIRNAME
+    released = json.loads((storage / "ticks.v1.json").read_text())
+    (storage / "ticks.v2.json").write_text(
+        json.dumps(
+            {**released, "schema_version": 2, "columns": [*released["columns"], column("venue")]}
+        )
     )
-    monkeypatch.setattr(module, "git_root", lambda _start: released_repo)
-    assert module.main(["--base", "HEAD", "--contracts-dir", str(released_repo / "contracts")]) == 2
+    result = run_in(released_repo)
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_check_deletion_returns_a_list_like_its_siblings():

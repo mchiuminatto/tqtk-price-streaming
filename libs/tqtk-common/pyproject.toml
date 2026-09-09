@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Shared contract types, stream naming, runtime server, config, and logging for the tqtk price pipeline."
 requires-python = ">=3.12"
 dependencies = [
+    "prometheus-client>=0.21",
     "pydantic>=2.9",
 ]
 

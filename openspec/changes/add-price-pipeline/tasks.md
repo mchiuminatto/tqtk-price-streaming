@@ -44,7 +44,7 @@
       `/ready` reflecting dependency-connection state distinct from process liveness; verify a
       service using it responds on `/health` immediately and on `/ready` only once dependencies
       (e.g. Redis) are connected.
-- [ ] 3.2 Implement the `/metrics` Prometheus-endpoint scaffolding in `tqtk-common`; verify
+- [x] 3.2 Implement the `/metrics` Prometheus-endpoint scaffolding in `tqtk-common`; verify
       `/metrics` returns valid Prometheus text format with no custom metrics registered yet.
 - [ ] 3.3 Implement a 12-factor (env-var driven) config loader in `tqtk-common`; verify a unit
       test confirms a changed environment variable changes the loaded config with no code change.

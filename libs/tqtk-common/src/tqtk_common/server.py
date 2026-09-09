@@ -1,4 +1,4 @@
-"""The shared `/health` and `/ready` HTTP server every service runs.
+"""The shared `/health`, `/ready` and `/metrics` HTTP server every service runs.
 
 The `service-runtime` capability draws one line and this module exists to hold it: `/health`
 answers "is this process alive", `/ready` answers "has it finished connecting to what it needs".
@@ -17,7 +17,8 @@ and scrape traffic that never touches the loop cannot contend with it - includin
 the thing that has stalled, which is the moment a probe most needs to answer. And `tqtk-common` is
 a dependency of all six services, so a web framework here is a framework in every image.
 
-Task 3.2 adds `/metrics` to the same server; `_Handler._route` is the one place that changes.
+The same server carries `/metrics`, for the same reason: a scrape is the one request that has
+to answer while the event loop is busy or wedged, since that is when the numbers are needed.
 """
 
 from __future__ import annotations
@@ -29,6 +30,10 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Final, Self
 from urllib.parse import urlsplit
+
+from prometheus_client import CollectorRegistry
+
+from tqtk_common.metrics import METRICS_CONTENT_TYPE, METRICS_PATH, default_registry, render
 
 __all__ = [
     "DEFAULT_HOST",
@@ -50,6 +55,11 @@ DEFAULT_HOST: Final = "0.0.0.0"  # bind-all is deliberate, not an oversight
 
 HEALTH_PATH: Final = "/health"
 READY_PATH: Final = "/ready"
+
+_JSON_CONTENT_TYPE: Final = "application/json"
+
+# What a route resolves to: a status, a rendered body, and the type that body is in.
+_Response = tuple[HTTPStatus, bytes, str]
 
 _JOIN_TIMEOUT_SECONDS: Final = 5.0
 
@@ -113,49 +123,56 @@ class Readiness:
 
 
 class _RuntimeHTTPServer(ThreadingHTTPServer):
-    """A `ThreadingHTTPServer` carrying the readiness its handlers report on."""
+    """A `ThreadingHTTPServer` carrying the state its handlers report on."""
 
     daemon_threads = True
 
-    def __init__(self, address: tuple[str, int], readiness: Readiness) -> None:
+    def __init__(
+        self, address: tuple[str, int], readiness: Readiness, registry: CollectorRegistry
+    ) -> None:
         super().__init__(address, _Handler)
         self.readiness = readiness
+        self.registry = registry
+
+
+def _json(status: HTTPStatus, payload: dict[str, Any]) -> _Response:
+    return status, json.dumps(payload).encode() + b"\n", _JSON_CONTENT_TYPE
 
 
 class _Handler(BaseHTTPRequestHandler):
-    """Routes the runtime endpoints. Every response is JSON, including the errors."""
+    """Routes the runtime endpoints. The probes answer JSON, `/metrics` its own text format."""
 
-    server: _RuntimeHTTPServer  # narrowed from BaseServer for the readiness attribute
+    server: _RuntimeHTTPServer  # narrowed from BaseServer for the readiness and registry
     protocol_version = "HTTP/1.1"
     server_version = "tqtk-runtime/1.0"
 
     def do_GET(self) -> None:  # the stdlib's dispatch name, not ours to rename
-        status, payload = self._route()
-        self._send(status, payload, with_body=True)
+        self._send(*self._route(), with_body=True)
 
     def do_HEAD(self) -> None:  # the stdlib's dispatch name, not ours to rename
         # Some probes send HEAD; the base class does not derive it from do_GET.
-        status, payload = self._route()
-        self._send(status, payload, with_body=False)
+        self._send(*self._route(), with_body=False)
 
-    def _route(self) -> tuple[HTTPStatus, dict[str, Any]]:
+    def _route(self) -> _Response:
         path = urlsplit(self.path).path
         if path == HEALTH_PATH:
             # Reached only by a process that is running and whose server thread is serving,
             # which is the whole of what liveness claims.
-            return HTTPStatus.OK, {"status": "alive"}
+            return _json(HTTPStatus.OK, {"status": "alive"})
         if path == READY_PATH:
             dependencies = self.server.readiness.snapshot()
             ready = all(dependencies.values())
             # 503 rather than 200-with-a-flag: an orchestrator's probe reads the status line.
             status = HTTPStatus.OK if ready else HTTPStatus.SERVICE_UNAVAILABLE
-            return status, {"ready": ready, "dependencies": dependencies}
-        return HTTPStatus.NOT_FOUND, {"error": "not found", "path": path}
+            return _json(status, {"ready": ready, "dependencies": dependencies})
+        if path == METRICS_PATH:
+            # Reading in-memory values on this thread - the scrape never reaches the event loop.
+            return HTTPStatus.OK, render(self.server.registry), METRICS_CONTENT_TYPE
+        return _json(HTTPStatus.NOT_FOUND, {"error": "not found", "path": path})
 
-    def _send(self, status: HTTPStatus, payload: dict[str, Any], *, with_body: bool) -> None:
-        body = json.dumps(payload).encode() + b"\n"
+    def _send(self, status: HTTPStatus, body: bytes, content_type: str, *, with_body: bool) -> None:
         self.send_response(status)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", content_type)
         # Sent on HEAD too: it describes the body a GET would return.
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -174,9 +191,12 @@ class RuntimeServer:
 
     Start it before connecting anything: that is what makes the not-ready window observable
     rather than a gap where nothing answers at all.
+
+    `registry` defaults to the client library's, the one a module-level `Counter(...)` lands in,
+    so a service instruments itself without handing anything to this class. Tests pass their own.
     """
 
-    __slots__ = ("_address", "_http", "_readiness", "_thread")
+    __slots__ = ("_address", "_http", "_readiness", "_registry", "_thread")
 
     def __init__(
         self,
@@ -184,8 +204,10 @@ class RuntimeServer:
         *,
         host: str = DEFAULT_HOST,
         port: int = DEFAULT_PORT,
+        registry: CollectorRegistry | None = None,
     ) -> None:
         self._readiness = readiness
+        self._registry = default_registry() if registry is None else registry
         self._address = (host, port)
         self._http: _RuntimeHTTPServer | None = None
         self._thread: threading.Thread | None = None
@@ -193,6 +215,11 @@ class RuntimeServer:
     @property
     def readiness(self) -> Readiness:
         return self._readiness
+
+    @property
+    def registry(self) -> CollectorRegistry:
+        """The registry `/metrics` renders - a service's own metrics go here."""
+        return self._registry
 
     @property
     def port(self) -> int:
@@ -206,7 +233,7 @@ class RuntimeServer:
             raise RuntimeError("server is already started")
         # Binding here rather than on the thread means a port clash raises out of `start`, to the
         # caller that can fail the startup, instead of killing a thread nobody is watching.
-        self._http = _RuntimeHTTPServer(self._address, self._readiness)
+        self._http = _RuntimeHTTPServer(self._address, self._readiness, self._registry)
         self._thread = threading.Thread(
             target=self._http.serve_forever,
             args=(_POLL_INTERVAL_SECONDS,),

@@ -11,6 +11,7 @@ do not fail every time the real schema legitimately grows.
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -24,8 +25,10 @@ from tools.ci.additive_only import (
     check_immutability,
     check_lineage,
     check_lineages,
+    git_root,
     lineages,
     main,
+    resolved_dir,
     strip_prose,
 )
 
@@ -176,7 +179,7 @@ def test_strip_prose_leaves_the_schema_alone():
 
 def test_deleting_a_released_version_fails():
     """A file that is gone appears in no glob of the working tree, so it is checked from git."""
-    assert check_deletion(artifact(1)).rule == "released version deleted"
+    assert [v.rule for v in check_deletion(artifact(1))] == ["released version deleted"]
 
 
 def git(repo: Path, *args: str) -> None:
@@ -206,16 +209,6 @@ def released_repo(tmp_path: Path) -> Path:
     git(tmp_path, "add", "-A")
     git(tmp_path, "commit", "-qm", "release v1")
     return tmp_path
-
-
-def run_in(repo: Path) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [sys.executable, str(repo / "tools" / "ci" / "additive_only.py"), "--base", "HEAD"],
-        capture_output=True,
-        text=True,
-        check=False,
-        cwd=repo,
-    )
 
 
 def test_the_released_repository_is_clean_to_begin_with(released_repo: Path):
@@ -249,6 +242,99 @@ def test_adding_a_new_table_is_not_a_deletion(released_repo: Path):
 def test_a_contracts_directory_outside_the_repository_has_nothing_released(tmp_path: Path):
     """The other tests pass --contracts-dir into a temp directory; nothing there was released."""
     assert artifact_paths_at_ref("HEAD", tmp_path, REPO_ROOT) == set()
+
+
+# --- the check must not pass by failing to run ---------------------------------------------------
+
+
+def run_in(repo: Path, *extra: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(repo / "tools" / "ci" / "additive_only.py"), "--base", "HEAD", *extra],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=repo,
+    )
+
+
+def test_a_relative_contracts_dir_still_catches_a_deletion(released_repo: Path):
+    """It used to compare a relative path against git's absolute one, match nothing, and pass."""
+    (released_repo / "contracts" / STORAGE_DIRNAME / "ticks.v1.json").unlink()
+    result = run_in(released_repo, "--contracts-dir", "contracts")
+    assert result.returncode == 1
+    assert "released version deleted" in result.stderr
+
+
+def test_a_contracts_dir_containing_dotdot_reports_no_false_deletion(released_repo: Path):
+    """The mirror failure: an unnormalised path matched nothing, so every contract looked gone."""
+    (released_repo / "libs").mkdir()
+    result = run_in(
+        released_repo, "--contracts-dir", str(released_repo / "libs" / ".." / "contracts")
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("given", ["contracts", "./contracts", "libs/../contracts"])
+def test_resolved_dir_normalises_every_spelling(released_repo: Path, given: str, monkeypatch):
+    monkeypatch.chdir(released_repo)
+    (released_repo / "libs").mkdir(exist_ok=True)
+    assert resolved_dir(given) == (released_repo / "contracts").resolve()
+
+
+def test_the_repository_root_comes_from_git_not_from_the_file_layout(released_repo: Path):
+    assert git_root(released_repo / "tools" / "ci") == released_repo.resolve()
+
+
+def test_outside_a_repository_there_is_no_root(tmp_path: Path):
+    assert git_root(tmp_path) is None
+
+
+def test_a_tree_vendored_below_the_repository_root_still_checks(
+    released_repo: Path, tmp_path: Path
+):
+    """`parents[2]` is where the project's files are, not necessarily the repository root.
+
+    With the two conflated, `git show` resolved every path from the wrong place, found nothing,
+    and both halves of the immutability check passed while reading nothing at all.
+    """
+    outer = tmp_path / "outer"
+    (outer / "sub").mkdir(parents=True)
+    for entry in ("contracts", "tools"):
+        shutil.copytree(released_repo / entry, outer / "sub" / entry)
+    git(outer, "init", "-q", ".")
+    git(outer, "add", "-A")
+    git(outer, "commit", "-qm", "vendored release v1")
+
+    inner = outer / "sub"
+    assert run_in(inner).returncode == 0
+
+    (inner / "contracts" / STORAGE_DIRNAME / "ticks.v1.json").unlink()
+    deleted = run_in(inner)
+    assert deleted.returncode == 1, deleted.stdout + deleted.stderr
+    assert "released version deleted" in deleted.stderr
+
+
+def test_an_unreadable_released_file_is_an_error_not_a_pass(released_repo: Path, monkeypatch):
+    """A path listed at the base ref that cannot be read there means the check is broken.
+
+    Reporting nothing would be the exact failure this check exists to prevent, dressed as
+    success - so it exits 2 ("could not run"), never 0.
+    """
+    import tools.ci.additive_only as module
+
+    (released_repo / "contracts" / STORAGE_DIRNAME / "ticks.v1.json").unlink()
+    monkeypatch.setattr(module, "at_ref", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        module, "artifact_paths_at_ref", lambda *_a, **_k: {released_repo / "gone.v1.json"}
+    )
+    monkeypatch.setattr(module, "git_root", lambda _start: released_repo)
+    assert module.main(["--base", "HEAD", "--contracts-dir", str(released_repo / "contracts")]) == 2
+
+
+def test_check_deletion_returns_a_list_like_its_siblings():
+    """`main` extends rather than appends; a check returning a bare Violation would silently
+    spread its fields across the list."""
+    assert rules(check_deletion(artifact(1))) == ["released version deleted"]
 
 
 # --- lineages across several tables and versions ------------------------------------------------

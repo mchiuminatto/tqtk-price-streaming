@@ -197,13 +197,19 @@ def artifact_paths_at_ref(ref: str, contracts_dir: Path, repo_root: Path) -> set
     """The artifacts that existed at `ref`, so a deletion is as visible as an edit.
 
     Empty when the contracts directory sits outside the repository, which is the case the tests
-    use: nothing there was ever released, so nothing there can be deleted.
+    use: nothing there was ever released, so nothing there can be deleted. `contracts_dir` must
+    already be resolved - a relative or `..`-bearing path would not be recognised as inside the
+    repository, and the deletion check would quietly find nothing to compare.
+
+    `--full-name` rather than the default: `git ls-tree` reports paths relative to the working
+    directory unless asked otherwise, so pinning them to the repository root is what makes
+    `repo_root / line` correct no matter where the process happens to be.
     """
     if not contracts_dir.is_relative_to(repo_root):
         return set()
     relative = contracts_dir.relative_to(repo_root) / STORAGE_DIRNAME
     result = subprocess.run(
-        ["git", "ls-tree", "-r", "--name-only", ref, "--", relative.as_posix()],
+        ["git", "ls-tree", "-r", "--full-name", "--name-only", ref, "--", relative.as_posix()],
         capture_output=True,
         text=True,
         cwd=repo_root,
@@ -218,14 +224,50 @@ def artifact_paths_at_ref(ref: str, contracts_dir: Path, repo_root: Path) -> set
     }
 
 
-def check_deletion(released: dict) -> Violation:
-    """What a released version may do by disappearing: nothing."""
-    return Violation(
-        released["table"],
-        "released version deleted",
-        f"v{released['schema_version']} no longer exists; a released version is frozen, "
-        "not removable - supersede it with a new version instead",
+def check_deletion(released: dict) -> list[Violation]:
+    """What a released version may do by disappearing: nothing.
+
+    Returns a list like every other `check_*`, so the caller extends rather than appends and the
+    next check added here has one shape to copy.
+    """
+    return [
+        Violation(
+            released["table"],
+            "released version deleted",
+            f"v{released['schema_version']} no longer exists; a released version is frozen, "
+            "not removable - supersede it with a new version instead",
+        )
+    ]
+
+
+def git_root(start: Path) -> Path | None:
+    """The git repository `start` sits in, or None outside one.
+
+    Deliberately not `Path(__file__).parents[2]`: that is where this project's files live, which
+    is the repository root only when the tree is checked out on its own. `git show` and
+    `git ls-tree` resolve paths from the repository root, so a tree vendored one level down would
+    miss every comparison - and the check would print its success line having read nothing.
+    """
+    result = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+        cwd=start,
+        check=False,
     )
+    if result.returncode != 0:
+        return None
+    return Path(result.stdout.strip()).resolve()
+
+
+def resolved_dir(value: str) -> Path:
+    """An argparse type: a directory as an absolute, normalised path.
+
+    Every git comparison keys on whether a path sits inside the repository and on comparing it
+    with what git reports. A relative `--contracts-dir` silently emptied the deletion check, and
+    one carrying `..` reported every contract as deleted; both are the same missing `resolve()`.
+    """
+    return Path(value).resolve()
 
 
 def ref_exists(ref: str, repo_root: Path) -> bool:
@@ -241,10 +283,12 @@ def ref_exists(ref: str, repo_root: Path) -> bool:
 
 
 def main(argv: list[str] | None = None) -> int:
-    repo_root = Path(__file__).resolve().parents[2]
+    project_root = Path(__file__).resolve().parents[2]
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", default="main", help="git ref to compare released versions to")
-    parser.add_argument("--contracts-dir", type=Path, default=repo_root / "contracts")
+    parser.add_argument(
+        "--contracts-dir", type=resolved_dir, default=(project_root / "contracts").resolve()
+    )
     args = parser.parse_args(argv)
 
     paths = artifact_paths(args.contracts_dir)
@@ -254,7 +298,11 @@ def main(argv: list[str] | None = None) -> int:
 
     violations = check_lineages(lineages(paths))
 
-    if ref_exists(args.base, repo_root):
+    # The repository the artifacts live in, which is not necessarily the directory this script
+    # sits three levels below - see `git_root`.
+    repo_root = git_root(project_root)
+
+    if repo_root is not None and ref_exists(args.base, repo_root):
         for path in paths:
             committed = at_ref(path, args.base, repo_root)
             if committed is not None:
@@ -262,11 +310,26 @@ def main(argv: list[str] | None = None) -> int:
         released_paths = artifact_paths_at_ref(args.base, args.contracts_dir, repo_root)
         for missing in sorted(released_paths - set(paths)):
             released = at_ref(missing, args.base, repo_root)
-            if released is not None:
-                violations.append(check_deletion(released))
+            if released is None:
+                # It was listed at `base` a moment ago, so failing to read it there is not the
+                # "nothing to compare" that `at_ref` returns None for elsewhere - it means this
+                # check is not working. Skipping it is how a deleted contract slips through
+                # behind a success line, which is the failure this whole check exists to prevent.
+                print(
+                    f"error: {missing} is listed at {args.base} but cannot be read there; "
+                    "the deletion check cannot run",
+                    file=sys.stderr,
+                )
+                return 2
+            violations.extend(check_deletion(released))
     else:
+        reason = (
+            f"{project_root} is not inside a git repository"
+            if repo_root is None
+            else f"base ref {args.base!r} does not resolve"
+        )
         print(
-            f"warning: base ref {args.base!r} does not resolve; checked the lineage on disk only, "
+            f"warning: {reason}; checked the lineage on disk only, "
             "not whether a released version was edited or deleted",
             file=sys.stderr,
         )

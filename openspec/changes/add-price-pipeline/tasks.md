@@ -46,7 +46,7 @@
       (e.g. Redis) are connected.
 - [x] 3.2 Implement the `/metrics` Prometheus-endpoint scaffolding in `tqtk-common`; verify
       `/metrics` returns valid Prometheus text format with no custom metrics registered yet.
-- [ ] 3.3 Implement a 12-factor (env-var driven) config loader in `tqtk-common`; verify a unit
+- [x] 3.3 Implement a 12-factor (env-var driven) config loader in `tqtk-common`; verify a unit
       test confirms a changed environment variable changes the loaded config with no code change.
 - [ ] 3.4 Implement structured JSON logging with INFO/DEBUG level separation (lifecycle,
       connection, checkpoint, batch-completion at INFO; per-tick detail at DEBUG only) in

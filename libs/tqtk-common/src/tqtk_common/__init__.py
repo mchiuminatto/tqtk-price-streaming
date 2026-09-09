@@ -2,6 +2,7 @@
 
 from tqtk_common.config import ENV_PREFIX, LogLevel, ServiceConfig
 from tqtk_common.delivery import Delivery, DeliveryTracker, Observation
+from tqtk_common.logs import JSONFormatter, configure_logging
 from tqtk_common.metrics import METRICS_CONTENT_TYPE, METRICS_PATH
 from tqtk_common.names import (
     BAR_STREAM_PATTERN,
@@ -37,6 +38,7 @@ __all__ = [
     "Delivery",
     "DeliveryTracker",
     "FeedSession",
+    "JSONFormatter",
     "LogLevel",
     "Observation",
     "Readiness",
@@ -48,5 +50,6 @@ __all__ = [
     "Timeframe",
     "bar_state_key",
     "bar_stream",
+    "configure_logging",
     "tick_stream",
 ]

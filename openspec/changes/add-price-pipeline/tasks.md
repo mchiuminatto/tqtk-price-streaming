@@ -48,7 +48,7 @@
       `/metrics` returns valid Prometheus text format with no custom metrics registered yet.
 - [x] 3.3 Implement a 12-factor (env-var driven) config loader in `tqtk-common`; verify a unit
       test confirms a changed environment variable changes the loaded config with no code change.
-- [ ] 3.4 Implement structured JSON logging with INFO/DEBUG level separation (lifecycle,
+- [x] 3.4 Implement structured JSON logging with INFO/DEBUG level separation (lifecycle,
       connection, checkpoint, batch-completion at INFO; per-tick detail at DEBUG only) in
       `tqtk-common`; verify a sample log line parses as JSON and no per-tick line appears at INFO.
 

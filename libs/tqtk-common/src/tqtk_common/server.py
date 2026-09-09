@@ -181,8 +181,8 @@ class _Handler(BaseHTTPRequestHandler):
 
     def log_message(self, format: str, *args: Any) -> None:
         # The stdlib writes a line per request to stderr, unstructured. Probes and scrapes are a
-        # few per second forever, so they belong at DEBUG, through the logging config task 3.4
-        # sets up - not on a second, plaintext channel.
+        # few per second forever, so they belong at DEBUG, through `configure_logging` - not on
+        # a second, plaintext channel.
         _log.debug("%s %s", self.address_string(), format % args)
 
 

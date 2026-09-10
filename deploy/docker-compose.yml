@@ -35,5 +35,44 @@ services:
       start_period: 5s
     restart: unless-stopped
 
+  # The system of record: PostgreSQL with the TimescaleDB extension, and no application tables.
+  # `ticks` and `bars` are created by their owning services' migrations, not here - see
+  # postgres/initdb/001-timescaledb.sql. Image pinned to the version the storage-contract tests
+  # already build against (libs/tqtk-common/tests/test_storage_fixture.py).
+  postgres:
+    image: timescale/timescaledb:2.17.2-pg16
+    # TimescaleDB's background worker otherwise reports usage to telemetry.timescale.com on a
+    # timer. Nothing in the pipeline needs it, and a private price feed should not be making
+    # outbound calls nobody asked for.
+    command: ["postgres", "-c", "timescaledb.telemetry_level=off"]
+    environment:
+      POSTGRES_USER: tqtk
+      POSTGRES_DB: tqtk
+      # Overridable for a real deployment; the default is a dev-stack credential, which is
+      # acceptable for the same reason Redis runs passwordless - LAN trust, and a loopback-only
+      # published port (architecture decision #9).
+      POSTGRES_PASSWORD: ${TQTK_POSTGRES_PASSWORD:-tqtk}
+      # initdb only: C collation with UTF-8 encoding, so a text index sorts by byte order
+      # regardless of the host's locale rather than picking one up from it.
+      POSTGRES_INITDB_ARGS: "--locale=C.UTF-8 --encoding=UTF8"
+    volumes:
+      # Extension only. Scripts here run once, on an empty data directory.
+      - ./postgres/initdb:/docker-entrypoint-initdb.d:ro
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      # `-d`/`-U` explicitly: pg_isready would otherwise probe the `root` database as the
+      # container's own user and report failure against a healthy server.
+      test: ["CMD-SHELL", "pg_isready -U tqtk -d tqtk"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      # initdb runs the extension install before the server accepts connections; a first start
+      # is meaningfully slower than a restart.
+      start_period: 30s
+    restart: unless-stopped
+
 volumes:
   redis-data:
+  postgres-data:

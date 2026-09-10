@@ -2,10 +2,11 @@
 
 Deployment assets for the tqtk price pipeline.
 
-- `docker-compose.yml` — the stack. Platform components land first (Redis now; PostgreSQL/
-  TimescaleDB, Prometheus and Grafana in tasks 4.2-4.4), the services on top of them as each is
-  built.
+- `docker-compose.yml` — the stack. Platform components land first (Redis and PostgreSQL/
+  TimescaleDB now; Prometheus and Grafana in tasks 4.3-4.4), the services on top of them as each
+  is built.
 - `redis/redis.conf` — Redis durability configuration, mounted by the Compose file.
+- `postgres/initdb/` — database bootstrap: the `timescaledb` extension, and nothing else.
 - minikube manifests — a later step, per the architecture note.
 
 Run Compose from the repository root, so relative paths and service build contexts resolve.
@@ -14,14 +15,18 @@ Run Compose from the repository root, so relative paths and service build contex
 
 ```bash
 docker compose -f deploy/docker-compose.yml up -d
-docker compose -f deploy/docker-compose.yml ps      # redis reports (healthy)
+docker compose -f deploy/docker-compose.yml ps      # every component reports (healthy)
 ```
+
+Both components publish on loopback only — `127.0.0.1:6379` and `127.0.0.1:5432` — for local
+tooling and tests, not to the LAN. The database is `tqtk`, as user `tqtk`; the password defaults
+to `tqtk` and is overridden with `TQTK_POSTGRES_PASSWORD` in the Compose environment.
 
 ## Teardown
 
 ```bash
-docker compose -f deploy/docker-compose.yml down    # stop; Redis data survives
-docker compose -f deploy/docker-compose.yml down -v # also discard the redis-data volume
+docker compose -f deploy/docker-compose.yml down    # stop; Redis and Postgres data survive
+docker compose -f deploy/docker-compose.yml down -v # also discard both data volumes
 ```
 
 Full stack bring-up and teardown, once every service is in it, is documented at task 13.4.
@@ -44,3 +49,23 @@ A non-empty `save` is what "RDB enabled" means: Redis disables snapshotting by s
 empty string. To confirm both mechanisms are actually writing, `ls /data` in the container shows
 `dump.rdb` alongside `appendonlydir/`, and a `docker compose restart redis` leaves keys written
 before it in place.
+
+## Verifying the database bootstrap
+
+The platform brings up the server and the extension only. `ticks` and `bars` belong to
+`tick-persistence-svc` and `bar-persistence-svc`, which apply their own migrations on startup
+(tasks 7.1 and 8.1), so on a stack where no service has run yet neither table exists:
+
+```bash
+docker compose -f deploy/docker-compose.yml exec postgres psql -U tqtk -d tqtk -c '\dx'
+#  timescaledb | 2.17.2 | public | Enables scalable inserts and complex queries for time-series data
+docker compose -f deploy/docker-compose.yml exec postgres psql -U tqtk -d tqtk -c '\dt'
+# Did not find any relations.
+```
+
+A table appearing in `\dt` before any service has started means platform bootstrap has taken
+over DDL that a service owns — the implicit shared surface the versioned storage contract exists
+to replace.
+
+The `initdb/` scripts run once, against an empty data directory. Re-running them after a schema
+change to the bootstrap means `down -v` first; on an existing volume they are skipped silently.

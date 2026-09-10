@@ -17,6 +17,7 @@ import time
 import urllib.error
 import urllib.request
 from http import HTTPStatus
+from unittest import mock
 
 import pytest
 from prometheus_client import CollectorRegistry, Counter
@@ -217,6 +218,24 @@ def test_the_probes_still_answer_while_the_registry_is_broken(broken_metrics):
     assert get(broken_metrics.port, "/ready")[0] == HTTPStatus.OK
 
 
+def _wait_until(condition, timeout: float = 5.0) -> None:
+    """Poll `condition` until it holds, or `timeout` elapses. Never asserts - the caller does."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and not condition():
+        time.sleep(0.01)
+
+
+def _abort(port: int, request: bytes | None) -> None:
+    """Connect, optionally send `request`, then RST rather than close cleanly."""
+    client = socket.create_connection(("127.0.0.1", port), timeout=5)
+    if request is not None:
+        client.sendall(request)
+    # SO_LINGER 0 makes close() send RST, so the server's read or write fails rather than
+    # draining into a peer that shut down politely.
+    client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+    client.close()
+
+
 def test_a_client_hanging_up_mid_response_is_not_a_traceback(capfd):
     """A scraper that hits its own timeout is routine traffic, not an error."""
     registry = CollectorRegistry()
@@ -225,18 +244,56 @@ def test_a_client_hanging_up_mid_response_is_not_a_traceback(capfd):
         counter = Counter(f"filler_{index}_total", "x" * 200, ["a"], registry=registry)
         counter.labels(a="y" * 200).inc()
 
+    baseline = threading.active_count()
     with RuntimeServer(Readiness(), host="127.0.0.1", port=0, registry=registry) as server:
-        client = socket.create_connection(("127.0.0.1", server.port), timeout=5)
-        client.sendall(b"GET /metrics HTTP/1.1\r\nHost: x\r\n\r\n")
-        # RST rather than FIN, so the server's write fails rather than draining into a closed peer.
-        client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
-        client.close()
+        _abort(server.port, b"GET /metrics HTTP/1.1\r\nHost: x\r\n\r\n")
 
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline and threading.active_count() > 2:
-            time.sleep(0.05)
+        # Wait for the handler thread to appear before waiting for it to go. Reading stderr
+        # against a thread that has not run yet finds it empty and passes for the wrong reason -
+        # which is how an earlier version of this test missed the bug it exists to catch, on
+        # roughly a third of runs. Both waits are relative to a captured baseline rather than a
+        # hardcoded count, so an unrelated thread elsewhere in the suite cannot skew them.
+        _wait_until(lambda: threading.active_count() > baseline + 1)
+        _wait_until(lambda: threading.active_count() <= baseline + 1)
 
     assert "Traceback" not in capfd.readouterr().err
+
+
+def test_a_client_aborting_before_it_sends_a_request_is_not_an_error(caplog):
+    """The read-side twin of the test above: the same abort, caught in a different place.
+
+    `_send` classifies a disconnect as DEBUG; `handle_error` has to agree, or the severity of a
+    port scan depends on whether the server had started writing when the client went away.
+    """
+    baseline = threading.active_count()
+    with (
+        RuntimeServer(Readiness(), host="127.0.0.1", port=0) as server,
+        caplog.at_level(logging.DEBUG),
+    ):
+        _abort(server.port, None)  # never sends a byte
+        _abort(server.port, b"GET /heal")  # partial request line
+
+        _wait_until(lambda: threading.active_count() <= baseline + 1)
+
+    assert [record for record in caplog.records if record.levelno >= logging.WARNING] == []
+    assert any("client disconnected" in record.message for record in caplog.records)
+
+
+def test_a_genuine_failure_outside_the_handler_is_still_an_error(caplog):
+    """The disconnect exemption must not swallow everything else `handle_error` is there for."""
+    baseline = threading.active_count()
+    with (
+        RuntimeServer(Readiness(), host="127.0.0.1", port=0) as server,
+        caplog.at_level(logging.DEBUG),
+        mock.patch.object(_Handler, "handle_one_request", side_effect=RuntimeError("boom")),
+    ):
+        _abort(server.port, b"GET /health HTTP/1.1\r\nHost: x\r\n\r\n")
+        _wait_until(lambda: threading.active_count() <= baseline + 1)
+
+    assert any(
+        record.levelno == logging.ERROR and "runtime connection failed" in record.message
+        for record in caplog.records
+    )
 
 
 # --- an idle connection does not own a thread forever -----------------------------------------

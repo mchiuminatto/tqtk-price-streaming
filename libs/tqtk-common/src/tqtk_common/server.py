@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -73,6 +74,12 @@ _POLL_INTERVAL_SECONDS: Final = 0.05
 # above any real probe or scrape interval, so it only ever fires on a connection that has gone
 # quiet - including one that never sent a byte.
 _IDLE_CONNECTION_TIMEOUT_SECONDS: Final = 10.0
+
+# What a client hanging up raises, wherever it lands. A scraper that hit its own timeout is
+# routine traffic rather than an error, and it is the same event whether it aborted before the
+# request was parsed or midway through the response - so both sites read it from here rather
+# than each keeping their own list to drift apart.
+_CLIENT_DISCONNECT_ERRORS: Final = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
 
 
 class Readiness:
@@ -145,6 +152,12 @@ class _RuntimeHTTPServer(ThreadingHTTPServer):
         # socketserver's default prints a traceback straight to stderr, unstructured - the one
         # channel `configure_logging` exists to empty. `_Handler` answers its own failures; this
         # is the backstop for anything raised outside it.
+        if isinstance(sys.exc_info()[1], _CLIENT_DISCONNECT_ERRORS):
+            # The client aborted before there was a response to write, so `_send` never saw it.
+            # No more an error here than there: an aborting probe or a port scan is not an event
+            # worth waking anyone for, and ERROR is what an operator alerts on.
+            _log.debug("client disconnected", extra={"client": str(client_address)})
+            return
         _log.exception("runtime connection failed", extra={"client": str(client_address)})
 
 
@@ -211,7 +224,7 @@ class _Handler(BaseHTTPRequestHandler):
             self.end_headers()
             if with_body:
                 self.wfile.write(body)
-        except (BrokenPipeError, ConnectionResetError):
+        except _CLIENT_DISCONNECT_ERRORS:
             # A scraper that hit its own timeout and hung up. Routine rather than an error, so
             # DEBUG with the per-request lines - and handled here so it is not a traceback.
             _log.debug("client disconnected before the response was written")

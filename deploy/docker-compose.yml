@@ -26,18 +26,23 @@ services:
       # the host publishes it for local tooling and tests, not to the LAN.
       - "127.0.0.1:6379:6379"
     healthcheck:
-      # Services wait on `service_healthy`, so this has to mean "answering commands", not
-      # "container started". Two things make that harder than it looks. `redis-cli` exits 0 on an
-      # error reply, so the exit status alone is not a verdict - the reply has to be matched. And
-      # PING is not the command to ask: Redis answers it while still loading the AOF, and answers
-      # it inconsistently once a write error is latched. A write is what a bus consumer actually
-      # needs, and it is the only probe observed to fail in both states - `-LOADING` during an AOF
-      # replay, and `-MISCONF` once `stop-writes-on-bgsave-error` has fired.
-      test: ["CMD-SHELL", "redis-cli SET health:probe 1 EX 30 | grep -q OK"]
-      interval: 5s
+      # Services wait on `service_healthy`, so this must mean "answering commands", not "container
+      # started". `redis-cli` exits 0 even on an error reply, so the `grep` matches the reply text
+      # rather than trusting the exit status - which is why this is not a bare `redis-cli PING`.
+      # `PING` is a faithful verdict here: Redis refuses it while loading (`-LOADING`) and once
+      # `stop-writes-on-bgsave-error` has latched (`-MISCONF`). An earlier `SET` probe forced a
+      # BGSAVE every 15 minutes on an idle stack.
+      #
+      # Full rationale, the timing math, and the `maxmemory` caveat that would change this call:
+      # deploy/README.md, "Why the healthcheck reads rather than writes".
+      test: ["CMD-SHELL", "redis-cli PING | grep -q PONG"]
+      interval: 15s
       timeout: 3s
       retries: 5
-      start_period: 5s
+      # A populated volume replays its AOF before Redis answers, so a cold start is meaningfully
+      # slower than a restart - matches the Postgres value; see redis/redis.conf for the
+      # recovery-time assumption behind it.
+      start_period: 30s
     restart: unless-stopped
 
   # The system of record: PostgreSQL with the TimescaleDB extension, and no application tables.

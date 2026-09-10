@@ -69,17 +69,65 @@ cat deploy/secrets/grafana_admin_password   # Grafana sign-in, user `admin`
 cat deploy/secrets/postgres_password        # psql, user `tqtk`
 ```
 
-**Rotating.** Delete the file and re-run `bootstrap-secrets.sh`. For Grafana that is enough —
-restart it and the new password applies. For Postgres it is not: `POSTGRES_PASSWORD_FILE` is read
-only by `initdb`, on an empty data directory, so on an existing volume the database keeps the old
-password until you change it in the database as well:
+The Grafana file is mode `0644` — uid 472 inside the container reads it directly and an
+owner-only file would crash-loop it — so the `0700` on `deploy/secrets/` is the only thing
+keeping that password away from other accounts on the host. `bootstrap-secrets.sh` re-asserts
+the directory mode on every run; do not loosen it by hand.
+
+New secrets are 48 hex characters — `openssl rand -hex 24`, 192 bits. Hex rather than base64 so
+the value drops into a connection URI without escaping; `bootstrap-secrets.sh` explains why a `+`
+or `/` in the value would bite. The script never replaces an existing file, so a machine set up
+before this change keeps its base64 value — rotate it deliberately (below) if you want the new
+alphabet there too.
+
+That is a guardrail, not the fix. Services added in tasks 7.1 and 8.1 should read the file and
+pass it to psycopg in keyword form — `host=... password=...` — rather than building a URI at all,
+which sidesteps the question of which characters need escaping instead of depending on the answer.
+
+**Rotating.** Delete the file and re-run `bootstrap-secrets.sh` to get a new value. That is only
+ever step one. On an already-initialised volume *neither* component picks the new secret up on its
+own, because both read it only when they first create their store — so a rotation that stops here
+leaves the old credential live while the file says otherwise.
+
+Postgres reads `POSTGRES_PASSWORD_FILE` only in `initdb`, on an empty data directory, so the
+database keeps the old password until you change it there as well. Use `\password` rather than a
+literal `ALTER USER … PASSWORD '…'`: it prompts without echoing and hashes client-side, so the
+plaintext stays out of your shell history, the container process list, and the Postgres server
+log.
 
 ```bash
 docker compose -f deploy/docker-compose.yml exec postgres \
-  psql -U tqtk -d tqtk -c "ALTER USER tqtk PASSWORD '<the new secret>'"
+  psql -U tqtk -d tqtk -c '\password tqtk'
+# Enter new password: — paste the contents of deploy/secrets/postgres_password
 ```
 
-Recreating the volume with `down -v` is the other way, and discards the data.
+
+Grafana is the same shape, and restarting it is **not** enough: `GF_SECURITY_ADMIN_PASSWORD__FILE`
+is consumed only when Grafana creates its user database on an empty `grafana-data` volume. The
+container comes back with the old password still working and no warning from either side.
+
+```bash
+docker compose -f deploy/docker-compose.yml exec grafana \
+  grafana cli admin reset-admin-password "$(cat deploy/secrets/grafana_admin_password)"
+# Admin password changed successfully ✔
+```
+
+The value is an argument there, so it is visible in the container's process list for the moment
+the command runs — acceptable on a single-host deploy, and the reason not to script this against a
+shared machine.
+
+Because the file and the database can disagree, the file is not evidence of what works. Ask:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' \
+  -u "admin:$(cat deploy/secrets/grafana_admin_password)" http://127.0.0.1:3000/api/org
+# 200
+```
+
+Recreating a volume with `down -v` is the other route for either component, and discards what is
+in it — the price data for Postgres, and for Grafana every dashboard edited in the UI plus all
+alert state.
+
 
 ## Teardown
 
@@ -105,9 +153,81 @@ docker compose -f deploy/docker-compose.yml exec redis redis-cli CONFIG GET save
 ```
 
 A non-empty `save` is what "RDB enabled" means: Redis disables snapshotting by setting it to an
-empty string. To confirm both mechanisms are actually writing, `ls /data` in the container shows
-`dump.rdb` alongside `appendonlydir/`, and a `docker compose restart redis` leaves keys written
-before it in place.
+
+empty string.
+
+To confirm both mechanisms are actually *writing*, do not reach for `ls /data` on a stack that has
+just come up. `appendonlydir/` is there from the first write, but `dump.rdb` is not: the earliest
+save point is `save 900 1`, so the first snapshot is fifteen minutes away, and its absence before
+then is normal rather than a fault. Ask Redis instead of the filesystem:
+
+```bash
+R="docker compose -f deploy/docker-compose.yml exec redis redis-cli"
+
+$R INFO persistence | grep rdb_last_save_time     # note this value
+# rdb_last_save_time:1789055184
+
+$R BGSAVE SCHEDULE
+# Background saving started        <- or "scheduled", if a child was already running
+
+$R INFO persistence | grep -E 'rdb_bgsave_in_progress|rdb_last_save_time|rdb_last_bgsave_status|aof_enabled'
+# rdb_bgsave_in_progress:0
+# rdb_last_save_time:1789055202     <- moved, so a snapshot really completed
+# rdb_last_bgsave_status:ok
+# aof_enabled:1
+```
+
+**Read the timestamp, not just the status.** `rdb_last_bgsave_status` is `ok` on a server that has
+never saved at all — it is the field's initial value, not a result — so on its own it is consistent
+with a snapshot that never happened, the same weakness as reading `ls /data`. A `rdb_last_save_time`
+that moved is the part that cannot be faked, which is why you note it before and compare after.
+
+**`BGSAVE SCHEDULE`, not a plain `BGSAVE`.** AOF is enabled here, and Redis allows only one child
+process at a time: a plain `BGSAVE` issued while an AOF rewrite is in flight is refused outright
+with `ERR Another child process is active (AOF?)`. The snapshot then never happens, the timestamp
+never moves, and the check looks like a persistence fault when it is ordinary housekeeping.
+`SCHEDULE` queues the save for whenever the current child finishes instead of failing.
+
+**Give the fork time.** `rdb_bgsave_in_progress:1` means it is still running — re-run the last
+command rather than concluding anything. Snapshot duration scales with the dataset; eight million
+keys takes about ninety seconds here. Only once that field reads `0` does an unmoved
+`rdb_last_save_time` mean the snapshot failed, and `rdb_last_bgsave_status:err` is what says so.
+
+`rdb_last_bgsave_status` is still the field to read when Redis starts refusing writes for no
+obvious reason: it is what latches on a failed snapshot, and what
+`stop-writes-on-bgsave-error yes` turns into those refusals.
+
+`dump.rdb` does appear on a clean shutdown, because Redis snapshots on `SIGTERM` when save points
+are configured. That is what makes `docker compose restart redis` leave keys written before it in
+place.
+
+### Why the healthcheck reads rather than writes
+
+The Compose healthcheck probes with `PING`, and matches the *reply* rather than the exit status —
+`redis-cli` exits 0 even on an error reply, so the exit code alone is not a verdict. `PING` is
+enough because Redis refuses it in both states a waiting consumer cares about: `-LOADING` while
+the AOF or RDB replays, and `-MISCONF` once `stop-writes-on-bgsave-error` has fired. Reads like
+`GET` still succeed in the second, so this is not simply "the server is down".
+
+An earlier version probed with a `SET`, on the belief that only a write fails in both. It does
+not, and the write was not free: every probe incremented `rdb_changes_since_last_save`, which kept
+`save 900 1` permanently satisfied and forked a BGSAVE every 15 minutes on a stack carrying no
+traffic at all. Reading costs nothing and detects the same two states.
+
+The one case a write probe would catch and `PING` would not is an OOM refusal under `maxmemory`
+with `noeviction` — writes rejected while `PING` still answers. `maxmemory` is deliberately unset
+(see `redis/redis.conf`), so that state is unreachable; if it is ever set, revisit the probe at the
+same time.
+
+`retries: 5` at `interval: 15s` means Redis is marked unhealthy 75 seconds after it stops
+answering. Nothing in the stack fails over on that signal today, so the slower verdict is the
+cheaper trade.
+
+`start_period: 30s` covers the other direction: on a populated volume Redis replays its AOF
+before it answers a single command, and probes that fail during that window do not count against
+`retries`. Thirty seconds matches the Postgres value and assumes the replay stays well inside it
+at the pipeline's volume — `redis/redis.conf` records that assumption, and it is the number to
+revisit if the working set grows enough to approach it.
 
 ## Verifying the database bootstrap
 
@@ -156,17 +276,20 @@ curl -s -X POST http://127.0.0.1:9090/-/reload           # then reload
 ## Verifying Grafana
 
 Grafana is provisioned from `grafana/provisioning/`, so the Prometheus datasource is wired on a
-clean volume with nothing to click. Sign in at <http://127.0.0.1:3000> (`admin` / `admin`, or
-`TQTK_GRAFANA_PASSWORD` if the LAN overlay is in use); the datasource is under Connections → Data
-sources → Prometheus, shown read-only because the file is its source of truth. **Save & test**
-there reports "Successfully queried the Prometheus API".
+clean volume with nothing to click. Sign in at <http://127.0.0.1:3000> as `admin`, with the
+password from `deploy/secrets/grafana_admin_password` — see [Credentials](#credentials), and note
+that on a volume where it has been rotated the live one may be the database's rather than the
+file's. The datasource is under Connections → Data sources → Prometheus, shown read-only because
+the file is its source of truth. **Save & test** there reports "Successfully queried the
+Prometheus API".
 
 Both checks without a browser:
 
 ```bash
 curl -s http://127.0.0.1:3000/api/health
 # {"database": "ok", "version": "11.4.0", ...}
-curl -s -u admin:admin http://127.0.0.1:3000/api/datasources/uid/tqtk-prometheus/health
+curl -s -u "admin:$(cat deploy/secrets/grafana_admin_password)" \
+  http://127.0.0.1:3000/api/datasources/uid/tqtk-prometheus/health
 # {"message":"Successfully queried the Prometheus API.","status":"OK"}
 ```
 

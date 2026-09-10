@@ -92,6 +92,7 @@ docker compose -f deploy/docker-compose.yml exec postgres \
   psql -U tqtk -d tqtk -c "ALTER USER tqtk PASSWORD '<the new secret>'"
 ```
 
+
 Grafana is the same shape, and restarting it is **not** enough: `GF_SECURITY_ADMIN_PASSWORD__FILE`
 is consumed only when Grafana creates its user database on an empty `grafana-data` volume. The
 container comes back with the old password still working and no warning from either side.
@@ -118,6 +119,7 @@ Recreating a volume with `down -v` is the other route for either component, and 
 in it — the price data for Postgres, and for Grafana every dashboard edited in the UI plus all
 alert state.
 
+
 ## Teardown
 
 ```bash
@@ -142,6 +144,7 @@ docker compose -f deploy/docker-compose.yml exec redis redis-cli CONFIG GET save
 ```
 
 A non-empty `save` is what "RDB enabled" means: Redis disables snapshotting by setting it to an
+
 empty string.
 
 To confirm both mechanisms are actually *writing*, do not reach for `ls /data` on a stack that has
@@ -210,6 +213,7 @@ same time.
 `retries: 5` at `interval: 15s` means Redis is marked unhealthy 75 seconds after it stops
 answering. Nothing in the stack fails over on that signal today, so the slower verdict is the
 cheaper trade.
+
 
 ## Verifying the database bootstrap
 

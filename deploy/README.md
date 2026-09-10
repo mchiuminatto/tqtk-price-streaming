@@ -69,11 +69,16 @@ cat deploy/secrets/grafana_admin_password   # Grafana sign-in, user `admin`
 cat deploy/secrets/postgres_password        # psql, user `tqtk`
 ```
 
+The Grafana file is mode `0644` — uid 472 inside the container reads it directly and an
+owner-only file would crash-loop it — so the `0700` on `deploy/secrets/` is the only thing
+keeping that password away from other accounts on the host. `bootstrap-secrets.sh` re-asserts
+the directory mode on every run; do not loosen it by hand.
+
 New secrets are 48 hex characters — `openssl rand -hex 24`, 192 bits. Hex rather than base64 so
-the value carries no `+` or `/`: a `/` in the userinfo of a `postgresql://user:pass@host/db` URI
-terminates the authority component, and the connection then fails to parse or quietly targets
-something else. The script never replaces an existing file, so a machine set up before this change
-keeps its base64 value — rotate it deliberately (below) if you want the new alphabet there too.
+the value drops into a connection URI or an environment variable without escaping;
+`bootstrap-secrets.sh` explains why a `+` or `/` in the value would bite. The script never
+replaces an existing file, so a machine set up before this change keeps its base64 value — rotate
+it deliberately (below) if you want the new alphabet there too.
 
 That is a guardrail, not the fix. Services added in tasks 7.1 and 8.1 should read the file and
 pass it to psycopg in keyword form — `host=... password=...` — rather than building a URI at all,
@@ -85,11 +90,15 @@ own, because both read it only when they first create their store — so a rotat
 leaves the old credential live while the file says otherwise.
 
 Postgres reads `POSTGRES_PASSWORD_FILE` only in `initdb`, on an empty data directory, so the
-database keeps the old password until you change it there as well:
+database keeps the old password until you change it there as well. Use `\password` rather than a
+literal `ALTER USER … PASSWORD '…'`: it prompts without echoing and hashes client-side, so the
+plaintext stays out of your shell history, the container process list, and the Postgres server
+log.
 
 ```bash
 docker compose -f deploy/docker-compose.yml exec postgres \
-  psql -U tqtk -d tqtk -c "ALTER USER tqtk PASSWORD '<the new secret>'"
+  psql -U tqtk -d tqtk -c '\password tqtk'
+# Enter new password: — paste the contents of deploy/secrets/postgres_password
 ```
 
 

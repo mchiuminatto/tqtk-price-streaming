@@ -44,6 +44,11 @@ chmod 700 "$secrets_dir"
 # account is shared, a file is the wrong mechanism - use the orchestrator's secret store, where
 # the `uid`/`gid`/`mode` fields on a secret actually apply.
 
+# Cleaned up on any exit, including the `set -e` one below: a generation that fails partway must
+# not leave a truncated value behind for the next run to keep as if it were real.
+tmp=""
+trap 'rm -f "$tmp"' EXIT
+
 for entry in postgres_password:600 grafana_admin_password:644; do
     name="${entry%%:*}"
     mode="${entry##*:}"
@@ -63,7 +68,18 @@ for entry in postgres_password:600 grafana_admin_password:644; do
     #
     # `tr -d` drops the newline openssl appends: the consumers strip a trailing newline themselves,
     # but a secret whose file has one is a secret that reads differently depending on who reads it.
-    openssl rand -hex 24 | tr -d '\n' > "$path"
-    chmod "$mode" "$path"
+    #
+    # Write to a sibling temp file (0600 from the umask, via mktemp), check the length, then rename
+    # into place - `mv` within a directory is atomic, so a reader sees either no file or the whole
+    # secret, never a half-written one that `[ -s ]` would then treat as valid forever.
+    tmp="$(mktemp "$path.XXXXXX")"
+    openssl rand -hex 24 | tr -d '\n' > "$tmp"
+    if [ "$(wc -c < "$tmp")" -ne 48 ]; then
+        echo "failed  $path: openssl produced $(wc -c < "$tmp") of 48 chars, not written" >&2
+        exit 1
+    fi
+    chmod "$mode" "$tmp"
+    mv "$tmp" "$path"
+    tmp=""
     echo "created $path (mode $mode)"
 done

@@ -2,12 +2,12 @@
 
 Deployment assets for the tqtk price pipeline.
 
-- `docker-compose.yml` — the stack. Platform components land first (Redis, PostgreSQL/
-  TimescaleDB and Prometheus now; Grafana in task 4.4), the services on top of them as each is
-  built.
+- `docker-compose.yml` — the stack. All four platform components are in it (Redis, PostgreSQL/
+  TimescaleDB, Prometheus, Grafana); the services go on top as each is built.
 - `redis/redis.conf` — Redis durability configuration, mounted by the Compose file.
 - `postgres/initdb/` — database bootstrap: the `timescaledb` extension, and nothing else.
 - `prometheus/prometheus.yml` — scrape configuration, one job per service.
+- `grafana/provisioning/` — datasource (and, from task 12.2, dashboards) provisioned from files.
 - minikube manifests — a later step, per the architecture note.
 
 Run Compose from the repository root, so relative paths and service build contexts resolve.
@@ -19,8 +19,10 @@ docker compose -f deploy/docker-compose.yml up -d
 docker compose -f deploy/docker-compose.yml ps      # every component reports (healthy)
 ```
 
-Every component publishes on loopback only — Redis on `127.0.0.1:6379`, Postgres on
-`127.0.0.1:5432`, Prometheus on `127.0.0.1:9090` — for local tooling and tests, not to the LAN. The database is `tqtk`, as user `tqtk`; the password defaults
+Every component publishes on loopback — Redis on `127.0.0.1:6379`, Postgres on `127.0.0.1:5432`,
+Prometheus on `127.0.0.1:9090`, Grafana on `127.0.0.1:3000` — for local tooling and tests, not to
+the LAN. Grafana is the exception that can be widened, being the one a person opens rather than a
+service connects to: `TQTK_GRAFANA_BIND=0.0.0.0`, and set `TQTK_GRAFANA_PASSWORD` when doing so. The database is `tqtk`, as user `tqtk`; the password defaults
 to `tqtk` and is overridden with `TQTK_POSTGRES_PASSWORD` in the Compose environment.
 
 ## Teardown
@@ -94,3 +96,23 @@ docker compose -f deploy/docker-compose.yml exec prometheus \
   promtool check config /etc/prometheus/prometheus.yml   # validate first
 curl -s -X POST http://127.0.0.1:9090/-/reload           # then reload
 ```
+
+## Verifying Grafana
+
+Grafana is provisioned from `grafana/provisioning/`, so the Prometheus datasource is wired on a
+clean volume with nothing to click. Sign in at <http://127.0.0.1:3000> (`admin` / `admin`, or
+`TQTK_GRAFANA_PASSWORD`); the datasource is under Connections → Data sources → Prometheus, shown
+read-only because the file is its source of truth. **Save & test** there reports "Successfully
+queried the Prometheus API".
+
+Both checks without a browser:
+
+```bash
+curl -s http://127.0.0.1:3000/api/health
+# {"database": "ok", "version": "11.4.0", ...}
+curl -s -u admin:admin http://127.0.0.1:3000/api/datasources/uid/tqtk-prometheus/health
+# {"message":"Successfully queried the Prometheus API.","status":"OK"}
+```
+
+`tqtk-prometheus` is a fixed `uid` on purpose: the task 12.2 dashboards reference it by that
+string, and a generated one would break them every time the volume is rebuilt.

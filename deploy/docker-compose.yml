@@ -99,7 +99,40 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  # Dashboards and alerting over the Prometheus data. Datasource and (from task 12.2) dashboards
+  # are provisioned from files, so a clean bring-up needs no clicking to reproduce.
+  grafana:
+    image: grafana/grafana:11.4.0
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${TQTK_GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      # No outbound calls nobody asked for, matching the TimescaleDB telemetry decision above.
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      # Dashboards edited in the UI, alert state, and the user database live here.
+      - grafana-data:/var/lib/grafana
+    ports:
+      # The one component a person opens rather than a service connects to, so unlike the others
+      # it may need to answer from another LAN host: set TQTK_GRAFANA_BIND=0.0.0.0 for that, and
+      # set TQTK_GRAFANA_PASSWORD when doing so.
+      - "${TQTK_GRAFANA_BIND:-127.0.0.1}:3000:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --spider http://localhost:3000/api/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
 volumes:
   redis-data:
   postgres-data:
   prometheus-data:
+  grafana-data:

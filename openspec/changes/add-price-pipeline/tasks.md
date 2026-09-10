@@ -62,7 +62,7 @@
       exist before any service has started.
 - [x] 4.3 Add Prometheus to Docker Compose, configured to scrape every service's `/metrics`;
       verify the Prometheus targets page shows all services as up once running.
-- [ ] 4.4 Add Grafana to Docker Compose wired to the Prometheus datasource; verify the Grafana UI
+- [x] 4.4 Add Grafana to Docker Compose wired to the Prometheus datasource; verify the Grafana UI
       loads and the datasource connection test succeeds.
 
 ## 5. feed-adapter-synthetic (`synthetic-feed` spec)

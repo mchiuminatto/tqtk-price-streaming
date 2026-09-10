@@ -1,0 +1,27 @@
+# The Prometheus datasource, provisioned rather than clicked in.
+#
+# Grafana reads this on every start, so a stack brought up from a clean volume has its datasource
+# already wired - which is what makes `docker compose up` reproduce the whole observability setup
+# rather than reproducing it up to a manual step. The dashboards in task 12.2 are provisioned the
+# same way and reference this datasource by `uid`.
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    # Stable and explicit: a provisioned dashboard names this string, and letting Grafana
+    # generate one would break every dashboard on a rebuilt volume.
+    uid: tqtk-prometheus
+    # Grafana's backend proxies the query, so the browser never has to reach Prometheus itself -
+    # which it could not do anyway, with the port published on loopback.
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    jsonData:
+      # Matches prometheus.yml's scrape_interval. It is what `$__rate_interval` is computed from,
+      # so a mismatch here is how a rate() query silently ends up spanning too few samples.
+      timeInterval: 15s
+    # This file is the source of truth. An edit in the UI would be a change no one can find and
+    # the next restart would revert, so the UI shows it read-only instead.
+    editable: false

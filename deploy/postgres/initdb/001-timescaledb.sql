@@ -1,0 +1,13 @@
+-- Platform bootstrap for the tqtk price pipeline's database.
+--
+-- The extension, and nothing else. The `ticks` and `bars` tables are deliberately absent: DDL
+-- ownership follows sole-writer ownership, so tick-persistence-svc and bar-persistence-svc each
+-- apply their own migrations on startup (tasks 7.1 and 8.1). A table created here would be a
+-- table no service owns - exactly the implicit shared surface the versioned storage contract
+-- exists to replace.
+--
+-- Runs once, on an empty data directory, as part of the image's initdb sequence. The image
+-- preloads the TimescaleDB library but does not create the extension in POSTGRES_DB, so this
+-- statement is what makes it available; IF NOT EXISTS keeps it correct against a database where
+-- something already did.
+CREATE EXTENSION IF NOT EXISTS timescaledb;

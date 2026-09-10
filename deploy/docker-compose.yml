@@ -1,0 +1,169 @@
+# The tqtk price pipeline stack, for local and single-host LAN bring-up.
+#
+# Platform components land first (tasks 4.1-4.4), the services on top of them as each is built.
+# Run from the repository root, so relative paths and service build contexts resolve:
+#
+#     docker compose -f deploy/docker-compose.yml up -d
+#
+# See deploy/README.md for bring-up, verification and teardown.
+
+name: tqtk
+
+services:
+  # The bus and the checkpoint store for every service - and, per the architecture note, the one
+  # shared platform dependency whose outage stalls the whole pipeline. Durability configuration
+  # (AOF `everysec` + RDB) lives in redis/redis.conf.
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    volumes:
+      - ./redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+      # Named, not bind-mounted: AOF and RDB have to outlive the container for a restart to
+      # recover anything.
+      - redis-data:/data
+    ports:
+      # Loopback-only. Redis runs without a password (LAN trust, architecture decision #9), so
+      # the host publishes it for local tooling and tests, not to the LAN.
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      # Services wait on `service_healthy`, so this has to mean "answering commands", not
+      # "container started". Two things make that harder than it looks. `redis-cli` exits 0 on an
+      # error reply, so the exit status alone is not a verdict - the reply has to be matched. And
+      # PING is not the command to ask: Redis answers it while still loading the AOF, and answers
+      # it inconsistently once a write error is latched. A write is what a bus consumer actually
+      # needs, and it is the only probe observed to fail in both states - `-LOADING` during an AOF
+      # replay, and `-MISCONF` once `stop-writes-on-bgsave-error` has fired.
+      test: ["CMD-SHELL", "redis-cli SET health:probe 1 EX 30 | grep -q OK"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  # The system of record: PostgreSQL with the TimescaleDB extension, and no application tables.
+  # `ticks` and `bars` are created by their owning services' migrations, not here - see
+  # postgres/initdb/001-timescaledb.sql. Image pinned to the version the storage-contract tests
+  # already build against (libs/tqtk-common/tests/test_storage_fixture.py).
+  postgres:
+    image: timescale/timescaledb:2.17.2-pg16
+    # TimescaleDB's background worker otherwise reports usage to telemetry.timescale.com on a
+    # timer. Nothing in the pipeline needs it, and a private price feed should not be making
+    # outbound calls nobody asked for.
+    command: ["postgres", "-c", "timescaledb.telemetry_level=off"]
+    environment:
+      POSTGRES_USER: tqtk
+      POSTGRES_DB: tqtk
+      # Read from a file, not from a variable with a default. A default here would be a working
+      # credential committed to the repository - and `POSTGRES_PASSWORD` in the environment is
+      # readable for the life of the container with `docker inspect`, by anyone who can talk to
+      # the Docker socket. The `_FILE` suffix is the official entrypoint's own convention: it
+      # reads the file and never puts the value in the environment. Generate it with
+      # deploy/bootstrap-secrets.sh; the stack refuses to start if it is missing, which is the
+      # intended behaviour - no silent fallback to a password everyone knows.
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      # initdb only: C collation with UTF-8 encoding, so a text index sorts by byte order
+      # regardless of the host's locale rather than picking one up from it.
+      POSTGRES_INITDB_ARGS: "--locale=C.UTF-8 --encoding=UTF8"
+    secrets:
+      - postgres_password
+    volumes:
+      # Extension only. Scripts here run once, on an empty data directory.
+      - ./postgres/initdb:/docker-entrypoint-initdb.d:ro
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      # `-d`/`-U` explicitly: pg_isready would otherwise probe the `root` database as the
+      # container's own user and report failure against a healthy server. `-h` explicitly too, and
+      # this is the load-bearing flag: without it pg_isready probes the Unix socket, which the
+      # temporary server initdb runs also serves, so the probe passes for the whole bootstrap while
+      # TCP - the only path a dependent service uses - is still refused. That server is started
+      # with `listen_addresses=''`, so asking over TCP is what distinguishes it from the real one.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U tqtk -d tqtk"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      # initdb runs the extension install before the server accepts connections; a first start
+      # is meaningfully slower than a restart.
+      start_period: 30s
+    restart: unless-stopped
+
+  # Metrics collection. Scrapes every service's /metrics on a pull schedule - see
+  # prometheus/prometheus.yml for the targets and why each service gets its own job. Until a
+  # service is built and in this file, its target reports down, which is the honest answer.
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      # Comfortably longer than any dashboard window, and small at this cardinality.
+      - --storage.tsdb.retention.time=15d
+      # Lets `POST /-/reload` pick up a scrape-config edit; adding a service should not mean
+      # restarting the thing watching the ones already running.
+      - --web.enable-lifecycle
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  # Dashboards and alerting over the Prometheus data. Datasource and (from task 12.2) dashboards
+  # are provisioned from files, so a clean bring-up needs no clicking to reproduce.
+  grafana:
+    image: grafana/grafana:11.4.0
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      # Same reasoning as the Postgres password above. `__FILE` (two underscores) is Grafana's
+      # own convention for this, handled by its entrypoint before the config is parsed.
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana_admin_password
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      # No outbound calls nobody asked for, matching the TimescaleDB telemetry decision above.
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+    secrets:
+      - grafana_admin_password
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      # Dashboards edited in the UI, alert state, and the user database live here.
+      - grafana-data:/var/lib/grafana
+    ports:
+      # Loopback, like every other component, and not overridable from here. Grafana is the one
+      # component a person opens rather than a service connects to, so it is the one whose port may
+      # need to answer from another LAN host. Widening it is a deliberate act rather than a
+      # variable on this file: it goes through docker-compose.lan.yml. The admin password is a
+      # generated secret either way, so widening no longer risks publishing a known credential -
+      # the overlay exists so that leaving loopback is visible in the command. See deploy/README.md.
+      - "127.0.0.1:3000:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --spider http://localhost:3000/api/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+# Credentials are files on the host, generated per machine by deploy/bootstrap-secrets.sh and
+# mounted at /run/secrets/<name>. Nothing here carries a default: a missing secret stops the stack
+# instead of starting it with a password that is in the repository for anyone to read.
+secrets:
+  postgres_password:
+    file: ./secrets/postgres_password
+  grafana_admin_password:
+    file: ./secrets/grafana_admin_password
+
+volumes:
+  redis-data:
+  postgres-data:
+  prometheus-data:
+  grafana-data:

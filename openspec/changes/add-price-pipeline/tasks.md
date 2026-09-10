@@ -54,15 +54,15 @@
 
 ## 4. Platform components
 
-- [ ] 4.1 Add Redis to Docker Compose with AOF (`everysec`) and RDB both enabled; verify
+- [x] 4.1 Add Redis to Docker Compose with AOF (`everysec`) and RDB both enabled; verify
       `redis-cli CONFIG GET appendonly` and `CONFIG GET save` reflect both enabled after startup.
-- [ ] 4.2 Add PostgreSQL + TimescaleDB to Docker Compose — server and `timescaledb` extension
+- [x] 4.2 Add PostgreSQL + TimescaleDB to Docker Compose — server and `timescaledb` extension
       only, with no application tables (each persistence service creates its own on startup, per
       tasks 7.1 and 8.1); verify the extension is available via `\dx` and that `ticks`/`bars` do not
       exist before any service has started.
-- [ ] 4.3 Add Prometheus to Docker Compose, configured to scrape every service's `/metrics`;
+- [x] 4.3 Add Prometheus to Docker Compose, configured to scrape every service's `/metrics`;
       verify the Prometheus targets page shows all services as up once running.
-- [ ] 4.4 Add Grafana to Docker Compose wired to the Prometheus datasource; verify the Grafana UI
+- [x] 4.4 Add Grafana to Docker Compose wired to the Prometheus datasource; verify the Grafana UI
       loads and the datasource connection test succeeds.
 
 ## 5. feed-adapter-synthetic (`synthetic-feed` spec)

@@ -27,8 +27,13 @@ services:
       - "127.0.0.1:6379:6379"
     healthcheck:
       # Services wait on `service_healthy`, so this has to mean "answering commands", not
-      # "container started".
-      test: ["CMD", "redis-cli", "PING"]
+      # "container started". Two things make that harder than it looks. `redis-cli` exits 0 on an
+      # error reply, so the exit status alone is not a verdict - the reply has to be matched. And
+      # PING is not the command to ask: Redis answers it while still loading the AOF, and answers
+      # it inconsistently once a write error is latched. A write is what a bus consumer actually
+      # needs, and it is the only probe observed to fail in both states - `-LOADING` during an AOF
+      # replay, and `-MISCONF` once `stop-writes-on-bgsave-error` has fired.
+      test: ["CMD-SHELL", "redis-cli SET health:probe 1 EX 30 | grep -q OK"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -63,8 +68,12 @@ services:
       - "127.0.0.1:5432:5432"
     healthcheck:
       # `-d`/`-U` explicitly: pg_isready would otherwise probe the `root` database as the
-      # container's own user and report failure against a healthy server.
-      test: ["CMD-SHELL", "pg_isready -U tqtk -d tqtk"]
+      # container's own user and report failure against a healthy server. `-h` explicitly too, and
+      # this is the load-bearing flag: without it pg_isready probes the Unix socket, which the
+      # temporary server initdb runs also serves, so the probe passes for the whole bootstrap while
+      # TCP - the only path a dependent service uses - is still refused. That server is started
+      # with `listen_addresses=''`, so asking over TCP is what distinguishes it from the real one.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U tqtk -d tqtk"]
       interval: 5s
       timeout: 3s
       retries: 10

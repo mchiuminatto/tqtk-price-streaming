@@ -53,13 +53,19 @@ services:
     environment:
       POSTGRES_USER: tqtk
       POSTGRES_DB: tqtk
-      # Overridable for a real deployment; the default is a dev-stack credential, which is
-      # acceptable for the same reason Redis runs passwordless - LAN trust, and a loopback-only
-      # published port (architecture decision #9).
-      POSTGRES_PASSWORD: ${TQTK_POSTGRES_PASSWORD:-tqtk}
+      # Read from a file, not from a variable with a default. A default here would be a working
+      # credential committed to the repository - and `POSTGRES_PASSWORD` in the environment is
+      # readable for the life of the container with `docker inspect`, by anyone who can talk to
+      # the Docker socket. The `_FILE` suffix is the official entrypoint's own convention: it
+      # reads the file and never puts the value in the environment. Generate it with
+      # deploy/bootstrap-secrets.sh; the stack refuses to start if it is missing, which is the
+      # intended behaviour - no silent fallback to a password everyone knows.
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
       # initdb only: C collation with UTF-8 encoding, so a text index sorts by byte order
       # regardless of the host's locale rather than picking one up from it.
       POSTGRES_INITDB_ARGS: "--locale=C.UTF-8 --encoding=UTF8"
+    secrets:
+      - postgres_password
     volumes:
       # Extension only. Scripts here run once, on an empty data directory.
       - ./postgres/initdb:/docker-entrypoint-initdb.d:ro
@@ -117,21 +123,28 @@ services:
         condition: service_healthy
     environment:
       GF_SECURITY_ADMIN_USER: admin
-      GF_SECURITY_ADMIN_PASSWORD: ${TQTK_GRAFANA_PASSWORD:-admin}
+      # Same reasoning as the Postgres password above. `__FILE` (two underscores) is Grafana's
+      # own convention for this, handled by its entrypoint before the config is parsed.
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana_admin_password
       GF_USERS_ALLOW_SIGN_UP: "false"
       # No outbound calls nobody asked for, matching the TimescaleDB telemetry decision above.
       GF_ANALYTICS_REPORTING_ENABLED: "false"
       GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
       GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+    secrets:
+      - grafana_admin_password
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       # Dashboards edited in the UI, alert state, and the user database live here.
       - grafana-data:/var/lib/grafana
     ports:
-      # The one component a person opens rather than a service connects to, so unlike the others
-      # it may need to answer from another LAN host: set TQTK_GRAFANA_BIND=0.0.0.0 for that, and
-      # set TQTK_GRAFANA_PASSWORD when doing so.
-      - "${TQTK_GRAFANA_BIND:-127.0.0.1}:3000:3000"
+      # Loopback, like every other component, and not overridable from here. Grafana is the one
+      # component a person opens rather than a service connects to, so it is the one whose port may
+      # need to answer from another LAN host. Widening it is a deliberate act rather than a
+      # variable on this file: it goes through docker-compose.lan.yml. The admin password is a
+      # generated secret either way, so widening no longer risks publishing a known credential -
+      # the overlay exists so that leaving loopback is visible in the command. See deploy/README.md.
+      - "127.0.0.1:3000:3000"
     healthcheck:
       test: ["CMD-SHELL", "wget --quiet --spider http://localhost:3000/api/health || exit 1"]
       interval: 10s
@@ -139,6 +152,15 @@ services:
       retries: 5
       start_period: 20s
     restart: unless-stopped
+
+# Credentials are files on the host, generated per machine by deploy/bootstrap-secrets.sh and
+# mounted at /run/secrets/<name>. Nothing here carries a default: a missing secret stops the stack
+# instead of starting it with a password that is in the repository for anyone to read.
+secrets:
+  postgres_password:
+    file: ./secrets/postgres_password
+  grafana_admin_password:
+    file: ./secrets/grafana_admin_password
 
 volumes:
   redis-data:

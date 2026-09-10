@@ -4,6 +4,11 @@ Deployment assets for the tqtk price pipeline.
 
 - `docker-compose.yml` — the stack. All four platform components are in it (Redis, PostgreSQL/
   TimescaleDB, Prometheus, Grafana); the services go on top as each is built.
+- `docker-compose.lan.yml` — overlay that publishes Grafana beyond loopback, and the only way to
+  do so.
+- `bootstrap-secrets.sh` — generates the stack's credentials into `secrets/`, once per machine.
+- `secrets/` — generated credentials. Git-ignored: nothing in this repository is a working
+  password.
 - `redis/redis.conf` — Redis durability configuration, mounted by the Compose file.
 - `postgres/initdb/` — database bootstrap: the `timescaledb` extension, and nothing else.
 - `prometheus/prometheus.yml` — scrape configuration, one job per service.
@@ -14,6 +19,14 @@ Run Compose from the repository root, so relative paths and service build contex
 
 ## Bring-up
 
+Once per machine, generate the credentials:
+
+```bash
+./deploy/bootstrap-secrets.sh    # idempotent; existing secrets are kept
+```
+
+Then:
+
 ```bash
 docker compose -f deploy/docker-compose.yml up -d
 docker compose -f deploy/docker-compose.yml ps      # every component reports (healthy)
@@ -21,9 +34,52 @@ docker compose -f deploy/docker-compose.yml ps      # every component reports (h
 
 Every component publishes on loopback — Redis on `127.0.0.1:6379`, Postgres on `127.0.0.1:5432`,
 Prometheus on `127.0.0.1:9090`, Grafana on `127.0.0.1:3000` — for local tooling and tests, not to
-the LAN. Grafana is the exception that can be widened, being the one a person opens rather than a
-service connects to: `TQTK_GRAFANA_BIND=0.0.0.0`, and set `TQTK_GRAFANA_PASSWORD` when doing so. The database is `tqtk`, as user `tqtk`; the password defaults
-to `tqtk` and is overridden with `TQTK_POSTGRES_PASSWORD` in the Compose environment.
+the LAN. The database is `tqtk`, as user `tqtk`.
+
+Grafana is the one that can be widened, being the one a person opens rather than a service connects
+to. That goes through an overlay file, not a variable on the base file:
+
+```bash
+docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.lan.yml up -d
+```
+
+`TQTK_GRAFANA_BIND` narrows the bind further than `0.0.0.0` if a specific interface is wanted.
+
+## Credentials
+
+Every credential is a file under `deploy/secrets/`, generated per machine, never committed. No
+password in this repository is a working password, and none is passed as an environment variable —
+`POSTGRES_PASSWORD` and `GF_SECURITY_ADMIN_PASSWORD` in a container's environment are readable for
+the life of that container by anyone who can reach the Docker socket:
+
+```bash
+docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' <container> | grep PASSWORD
+```
+
+The Compose file uses each image's own file convention instead — `POSTGRES_PASSWORD_FILE` for
+Postgres, `GF_SECURITY_ADMIN_PASSWORD__FILE` (two underscores) for Grafana — so only the path
+appears in the environment. Both strip a trailing newline from the file, which is why
+`bootstrap-secrets.sh` writes none.
+
+There is no default and no fallback: a missing secret file stops the stack rather than starting it
+with a credential everyone can read. Read one when you need it, rather than copying it somewhere:
+
+```bash
+cat deploy/secrets/grafana_admin_password   # Grafana sign-in, user `admin`
+cat deploy/secrets/postgres_password        # psql, user `tqtk`
+```
+
+**Rotating.** Delete the file and re-run `bootstrap-secrets.sh`. For Grafana that is enough —
+restart it and the new password applies. For Postgres it is not: `POSTGRES_PASSWORD_FILE` is read
+only by `initdb`, on an empty data directory, so on an existing volume the database keeps the old
+password until you change it in the database as well:
+
+```bash
+docker compose -f deploy/docker-compose.yml exec postgres \
+  psql -U tqtk -d tqtk -c "ALTER USER tqtk PASSWORD '<the new secret>'"
+```
+
+Recreating the volume with `down -v` is the other way, and discards the data.
 
 ## Teardown
 
@@ -101,9 +157,9 @@ curl -s -X POST http://127.0.0.1:9090/-/reload           # then reload
 
 Grafana is provisioned from `grafana/provisioning/`, so the Prometheus datasource is wired on a
 clean volume with nothing to click. Sign in at <http://127.0.0.1:3000> (`admin` / `admin`, or
-`TQTK_GRAFANA_PASSWORD`); the datasource is under Connections → Data sources → Prometheus, shown
-read-only because the file is its source of truth. **Save & test** there reports "Successfully
-queried the Prometheus API".
+`TQTK_GRAFANA_PASSWORD` if the LAN overlay is in use); the datasource is under Connections → Data
+sources → Prometheus, shown read-only because the file is its source of truth. **Save & test**
+there reports "Successfully queried the Prometheus API".
 
 Both checks without a browser:
 

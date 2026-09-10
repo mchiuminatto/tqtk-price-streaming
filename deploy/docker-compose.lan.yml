@@ -1,0 +1,25 @@
+# LAN exposure for Grafana, as an explicit overlay rather than a variable on the base file.
+#
+# Grafana is the one component a person opens rather than a service connects to, so it is the one
+# that may need to answer from another host on the LAN. The base file publishes it on loopback and
+# offers no way to change that, so leaving loopback is visible in the command that does it rather
+# than in an environment variable someone set three shells ago:
+#
+#     docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.lan.yml up -d
+#
+# `!override` replaces the base file's port mapping instead of adding a second one - list-valued
+# keys merge by appending, and two mappings for :3000 would collide at bind time.
+#
+# The admin password is a generated secret in both cases (deploy/bootstrap-secrets.sh), so this
+# overlay cannot publish a known credential the way a bind-address variable on the base file once
+# could. Per architecture decision #9 the LAN is a trusted network, so this is exposure to a
+# trusted segment - but decision #9 also says to revisit that when the trust boundary moves, and
+# adding this file to the command is exactly such a moment.
+#
+# `TQTK_GRAFANA_BIND` narrows the bind further than 0.0.0.0 if a specific interface is wanted.
+
+services:
+  grafana:
+    ports:
+      !override
+      - "${TQTK_GRAFANA_BIND:-0.0.0.0}:3000:3000"

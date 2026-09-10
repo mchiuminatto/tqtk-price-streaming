@@ -26,29 +26,23 @@ services:
       # the host publishes it for local tooling and tests, not to the LAN.
       - "127.0.0.1:6379:6379"
     healthcheck:
-      # Services wait on `service_healthy`, so this has to mean "answering commands", not
-      # "container started". The trap is that `redis-cli` exits 0 on an error reply, so the exit
-      # status alone is not a verdict - the reply itself has to be matched, which is what the
-      # `grep` is for and why this is not a bare `redis-cli PING`.
+      # Services wait on `service_healthy`, so this must mean "answering commands", not "container
+      # started". `redis-cli` exits 0 even on an error reply, so the `grep` matches the reply text
+      # rather than trusting the exit status - which is why this is not a bare `redis-cli PING`.
+      # `PING` is a faithful verdict here: Redis refuses it while loading (`-LOADING`) and once
+      # `stop-writes-on-bgsave-error` has latched (`-MISCONF`). An earlier `SET` probe forced a
+      # BGSAVE every 15 minutes on an idle stack.
       #
-      # PING's reply is a faithful verdict, though, because Redis refuses it in both states a
-      # waiting consumer cares about: `-LOADING` while the AOF or RDB replays, and `-MISCONF` once
-      # `stop-writes-on-bgsave-error` has fired (verified against 7.4 - PING returns the error in
-      # both, while reads like GET still succeed). An earlier version of this file probed with a
-      # SET on the belief that only a write fails in both. That is not so, and the write cost a
-      # standing BGSAVE every 15 minutes: each probe bumped `rdb_changes_since_last_save`, which
-      # keeps `save 900 1` permanently satisfied on a stack with no traffic at all.
-      #
-      # A write probe would earn its place if `maxmemory` were ever set: an OOM refusal with
-      # `noeviction` stops writes while PING still answers. `maxmemory` is deliberately unset
-      # (see redis/redis.conf), so that state is unreachable - revisit this probe alongside it.
-      #
-      # 15s x 5 retries puts the unhealthy verdict 75s after Redis stops answering.
+      # Full rationale, the timing math, and the `maxmemory` caveat that would change this call:
+      # deploy/README.md, "Why the healthcheck reads rather than writes".
       test: ["CMD-SHELL", "redis-cli PING | grep -q PONG"]
       interval: 15s
       timeout: 3s
       retries: 5
-      start_period: 5s
+      # A populated volume replays its AOF before Redis answers, so a cold start is meaningfully
+      # slower than a restart - matches the Postgres value; see redis/redis.conf for the
+      # recovery-time assumption behind it.
+      start_period: 30s
     restart: unless-stopped
 
   # The system of record: PostgreSQL with the TimescaleDB extension, and no application tables.

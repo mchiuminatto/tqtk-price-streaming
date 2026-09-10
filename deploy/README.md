@@ -214,6 +214,11 @@ same time.
 answering. Nothing in the stack fails over on that signal today, so the slower verdict is the
 cheaper trade.
 
+`start_period: 30s` covers the other direction: on a populated volume Redis replays its AOF
+before it answers a single command, and probes that fail during that window do not count against
+`retries`. Thirty seconds matches the Postgres value and assumes the replay stays well inside it
+at the pipeline's volume — `redis/redis.conf` records that assumption, and it is the number to
+revisit if the working set grows enough to approach it.
 
 ## Verifying the database bootstrap
 

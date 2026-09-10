@@ -27,14 +27,25 @@ services:
       - "127.0.0.1:6379:6379"
     healthcheck:
       # Services wait on `service_healthy`, so this has to mean "answering commands", not
-      # "container started". Two things make that harder than it looks. `redis-cli` exits 0 on an
-      # error reply, so the exit status alone is not a verdict - the reply has to be matched. And
-      # PING is not the command to ask: Redis answers it while still loading the AOF, and answers
-      # it inconsistently once a write error is latched. A write is what a bus consumer actually
-      # needs, and it is the only probe observed to fail in both states - `-LOADING` during an AOF
-      # replay, and `-MISCONF` once `stop-writes-on-bgsave-error` has fired.
-      test: ["CMD-SHELL", "redis-cli SET health:probe 1 EX 30 | grep -q OK"]
-      interval: 5s
+      # "container started". The trap is that `redis-cli` exits 0 on an error reply, so the exit
+      # status alone is not a verdict - the reply itself has to be matched, which is what the
+      # `grep` is for and why this is not a bare `redis-cli PING`.
+      #
+      # PING's reply is a faithful verdict, though, because Redis refuses it in both states a
+      # waiting consumer cares about: `-LOADING` while the AOF or RDB replays, and `-MISCONF` once
+      # `stop-writes-on-bgsave-error` has fired (verified against 7.4 - PING returns the error in
+      # both, while reads like GET still succeed). An earlier version of this file probed with a
+      # SET on the belief that only a write fails in both. That is not so, and the write cost a
+      # standing BGSAVE every 15 minutes: each probe bumped `rdb_changes_since_last_save`, which
+      # keeps `save 900 1` permanently satisfied on a stack with no traffic at all.
+      #
+      # A write probe would earn its place if `maxmemory` were ever set: an OOM refusal with
+      # `noeviction` stops writes while PING still answers. `maxmemory` is deliberately unset
+      # (see redis/redis.conf), so that state is unreachable - revisit this probe alongside it.
+      #
+      # 15s x 5 retries puts the unhealthy verdict 75s after Redis stops answering.
+      test: ["CMD-SHELL", "redis-cli PING | grep -q PONG"]
+      interval: 15s
       timeout: 3s
       retries: 5
       start_period: 5s

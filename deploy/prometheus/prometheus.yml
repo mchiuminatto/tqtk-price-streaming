@@ -1,0 +1,48 @@
+# Prometheus scrape configuration for the tqtk price pipeline.
+#
+# The observability capability puts the whole latency story on a pull: each service records into
+# an in-process histogram and Prometheus collects on its own schedule, so nothing on the tick path
+# makes a network call to report. This file is the collecting half.
+#
+# One job per service rather than one job listing six targets. `job` is then the service name, so
+# `up{job="aggregation-svc"}` is the failure-isolation dashboard's per-service up/down series and
+# the "health failing or unscraped" alert's condition, without a relabel to recover the name. It
+# also lets one service's scrape settings diverge later without disturbing the others.
+#
+# Targets are Compose service names on the shared network, resolved by Docker's DNS. Port 8000 is
+# the runtime contract's port - every service's Dockerfile exposes it and `tqtk_common.server`
+# defaults to it - and `/metrics` is the default path, so neither is spelled out per job.
+
+global:
+  # Fast enough that a `tick_to_bar_latency_ms` p99 breach sustained over a minute (the alert's
+  # window) is several samples rather than a couple, and slow enough to stay cheap at this
+  # cardinality - 13 symbols x 8 timeframes of histogram buckets per scrape.
+  scrape_interval: 15s
+  # Below the interval, so a service wedged mid-scrape fails that scrape and reports `up == 0`
+  # instead of overlapping into the next one.
+  scrape_timeout: 10s
+
+scrape_configs:
+  - job_name: feed-adapter-synthetic
+    static_configs:
+      - targets: ["feed-adapter-synthetic:8000"]
+
+  - job_name: aggregation-svc
+    static_configs:
+      - targets: ["aggregation-svc:8000"]
+
+  - job_name: tick-persistence-svc
+    static_configs:
+      - targets: ["tick-persistence-svc:8000"]
+
+  - job_name: bar-persistence-svc
+    static_configs:
+      - targets: ["bar-persistence-svc:8000"]
+
+  - job_name: streaming-gateway-svc
+    static_configs:
+      - targets: ["streaming-gateway-svc:8000"]
+
+  - job_name: historical-query-svc
+    static_configs:
+      - targets: ["historical-query-svc:8000"]

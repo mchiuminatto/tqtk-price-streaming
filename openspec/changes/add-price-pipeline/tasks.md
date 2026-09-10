@@ -60,7 +60,7 @@
       only, with no application tables (each persistence service creates its own on startup, per
       tasks 7.1 and 8.1); verify the extension is available via `\dx` and that `ticks`/`bars` do not
       exist before any service has started.
-- [ ] 4.3 Add Prometheus to Docker Compose, configured to scrape every service's `/metrics`;
+- [x] 4.3 Add Prometheus to Docker Compose, configured to scrape every service's `/metrics`;
       verify the Prometheus targets page shows all services as up once running.
 - [ ] 4.4 Add Grafana to Docker Compose wired to the Prometheus datasource; verify the Grafana UI
       loads and the datasource connection test succeeds.

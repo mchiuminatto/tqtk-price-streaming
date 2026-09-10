@@ -2,11 +2,12 @@
 
 Deployment assets for the tqtk price pipeline.
 
-- `docker-compose.yml` — the stack. Platform components land first (Redis and PostgreSQL/
-  TimescaleDB now; Prometheus and Grafana in tasks 4.3-4.4), the services on top of them as each
-  is built.
+- `docker-compose.yml` — the stack. Platform components land first (Redis, PostgreSQL/
+  TimescaleDB and Prometheus now; Grafana in task 4.4), the services on top of them as each is
+  built.
 - `redis/redis.conf` — Redis durability configuration, mounted by the Compose file.
 - `postgres/initdb/` — database bootstrap: the `timescaledb` extension, and nothing else.
+- `prometheus/prometheus.yml` — scrape configuration, one job per service.
 - minikube manifests — a later step, per the architecture note.
 
 Run Compose from the repository root, so relative paths and service build contexts resolve.
@@ -18,8 +19,8 @@ docker compose -f deploy/docker-compose.yml up -d
 docker compose -f deploy/docker-compose.yml ps      # every component reports (healthy)
 ```
 
-Both components publish on loopback only — `127.0.0.1:6379` and `127.0.0.1:5432` — for local
-tooling and tests, not to the LAN. The database is `tqtk`, as user `tqtk`; the password defaults
+Every component publishes on loopback only — Redis on `127.0.0.1:6379`, Postgres on
+`127.0.0.1:5432`, Prometheus on `127.0.0.1:9090` — for local tooling and tests, not to the LAN. The database is `tqtk`, as user `tqtk`; the password defaults
 to `tqtk` and is overridden with `TQTK_POSTGRES_PASSWORD` in the Compose environment.
 
 ## Teardown
@@ -69,3 +70,27 @@ to replace.
 
 The `initdb/` scripts run once, against an empty data directory. Re-running them after a schema
 change to the bootstrap means `down -v` first; on an existing volume they are skipped silently.
+
+## Verifying the Prometheus scrape configuration
+
+Prometheus scrapes `/metrics` on port 8000 of every service, one job per service, so the
+failure-isolation dashboard and the "health failing or unscraped" alert both read
+`up{job="<service>"}`. The targets page lists all six from the first start:
+
+```bash
+xdg-open http://127.0.0.1:9090/targets                       # or curl the API:
+curl -s http://127.0.0.1:9090/api/v1/targets \
+  | python3 -c 'import json,sys; [print(t["labels"]["job"], t["health"]) for t in json.load(sys.stdin)["data"]["activeTargets"]]'
+```
+
+A target reports down until the service behind it exists and is in this Compose file — which is
+the honest answer, not a misconfiguration. All six read `up` once the services are running;
+task 13.1 is where that is checked against the real stack.
+
+Editing the scrape config does not need a restart:
+
+```bash
+docker compose -f deploy/docker-compose.yml exec prometheus \
+  promtool check config /etc/prometheus/prometheus.yml   # validate first
+curl -s -X POST http://127.0.0.1:9090/-/reload           # then reload
+```

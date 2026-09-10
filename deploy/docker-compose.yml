@@ -1,0 +1,39 @@
+# The tqtk price pipeline stack, for local and single-host LAN bring-up.
+#
+# Platform components land first (tasks 4.1-4.4), the services on top of them as each is built.
+# Run from the repository root, so relative paths and service build contexts resolve:
+#
+#     docker compose -f deploy/docker-compose.yml up -d
+#
+# See deploy/README.md for bring-up, verification and teardown.
+
+name: tqtk
+
+services:
+  # The bus and the checkpoint store for every service - and, per the architecture note, the one
+  # shared platform dependency whose outage stalls the whole pipeline. Durability configuration
+  # (AOF `everysec` + RDB) lives in redis/redis.conf.
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    volumes:
+      - ./redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+      # Named, not bind-mounted: AOF and RDB have to outlive the container for a restart to
+      # recover anything.
+      - redis-data:/data
+    ports:
+      # Loopback-only. Redis runs without a password (LAN trust, architecture decision #9), so
+      # the host publishes it for local tooling and tests, not to the LAN.
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      # Services wait on `service_healthy`, so this has to mean "answering commands", not
+      # "container started".
+      test: ["CMD", "redis-cli", "PING"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+volumes:
+  redis-data:

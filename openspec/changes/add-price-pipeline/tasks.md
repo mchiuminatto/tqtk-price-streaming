@@ -54,7 +54,7 @@
 
 ## 4. Platform components
 
-- [ ] 4.1 Add Redis to Docker Compose with AOF (`everysec`) and RDB both enabled; verify
+- [x] 4.1 Add Redis to Docker Compose with AOF (`everysec`) and RDB both enabled; verify
       `redis-cli CONFIG GET appendonly` and `CONFIG GET save` reflect both enabled after startup.
 - [ ] 4.2 Add PostgreSQL + TimescaleDB to Docker Compose — server and `timescaledb` extension
       only, with no application tables (each persistence service creates its own on startup, per

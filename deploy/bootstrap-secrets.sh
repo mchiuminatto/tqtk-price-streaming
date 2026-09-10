@@ -69,8 +69,8 @@ for entry in postgres_password:600 grafana_admin_password:644; do
     # `tr -d` drops the newline openssl appends: the consumers strip a trailing newline themselves,
     # but a secret whose file has one is a secret that reads differently depending on who reads it.
     #
-    # Write to a sibling temp file (0600 from the umask, via mktemp), check the length, then rename
-    # into place - `mv` within a directory is atomic, so a reader sees either no file or the whole
+    # Write to a sibling temp file (0600, which mktemp forces), check the length, then rename into
+    # place - `mv` within a directory is atomic, so a reader sees either no file or the whole
     # secret, never a half-written one that `[ -s ]` would then treat as valid forever.
     tmp="$(mktemp "$path.XXXXXX")"
     openssl rand -hex 24 | tr -d '\n' > "$tmp"

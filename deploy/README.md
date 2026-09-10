@@ -75,7 +75,7 @@ keeping that password away from other accounts on the host. `bootstrap-secrets.s
 the directory mode on every run; do not loosen it by hand.
 
 New secrets are 48 hex characters — `openssl rand -hex 24`, 192 bits. Hex rather than base64 so
-the value drops into a connection URI or an environment variable without escaping;
+the value drops into a connection URI or a shell command line without escaping;
 `bootstrap-secrets.sh` explains why a `+` or `/` in the value would bite. The script never
 replaces an existing file, so a machine set up before this change keeps its base64 value — rotate
 it deliberately (below) if you want the new alphabet there too.

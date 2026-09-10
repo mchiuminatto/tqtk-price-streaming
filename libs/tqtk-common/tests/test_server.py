@@ -225,6 +225,26 @@ def _wait_until(condition, timeout: float = 5.0) -> None:
         time.sleep(0.01)
 
 
+def _wait_for_a_handled_connection(baseline: int) -> None:
+    """Wait for a handler thread to appear, and then to finish.
+
+    Both halves matter. Waiting only for threads to go returns immediately when the handler has
+    not spawned yet, so whatever follows runs against work that has not happened. Used only where
+    the assertion is about an *absence* and so cannot be waited for directly; where there is a
+    record to wait for, `_wait_until(_logged(...))` is tighter and fails faster.
+    """
+    _wait_until(lambda: threading.active_count() > baseline + 1)
+    _wait_until(lambda: threading.active_count() <= baseline + 1)
+
+
+def _logged(caplog, message: str, *, level: int = logging.DEBUG, count: int = 1) -> bool:
+    """Whether at least `count` captured records at `level` carry `message`."""
+    matched = [
+        record for record in caplog.records if record.levelno == level and message in record.message
+    ]
+    return len(matched) >= count
+
+
 def _abort(port: int, request: bytes | None) -> None:
     """Connect, optionally send `request`, then RST rather than close cleanly."""
     client = socket.create_connection(("127.0.0.1", port), timeout=5)
@@ -253,8 +273,7 @@ def test_a_client_hanging_up_mid_response_is_not_a_traceback(capfd):
         # which is how an earlier version of this test missed the bug it exists to catch, on
         # roughly a third of runs. Both waits are relative to a captured baseline rather than a
         # hardcoded count, so an unrelated thread elsewhere in the suite cannot skew them.
-        _wait_until(lambda: threading.active_count() > baseline + 1)
-        _wait_until(lambda: threading.active_count() <= baseline + 1)
+        _wait_for_a_handled_connection(baseline)
 
     assert "Traceback" not in capfd.readouterr().err
 
@@ -265,7 +284,6 @@ def test_a_client_aborting_before_it_sends_a_request_is_not_an_error(caplog):
     `_send` classifies a disconnect as DEBUG; `handle_error` has to agree, or the severity of a
     port scan depends on whether the server had started writing when the client went away.
     """
-    baseline = threading.active_count()
     with (
         RuntimeServer(Readiness(), host="127.0.0.1", port=0) as server,
         caplog.at_level(logging.DEBUG),
@@ -273,27 +291,27 @@ def test_a_client_aborting_before_it_sends_a_request_is_not_an_error(caplog):
         _abort(server.port, None)  # never sends a byte
         _abort(server.port, b"GET /heal")  # partial request line
 
-        _wait_until(lambda: threading.active_count() <= baseline + 1)
+        # Wait for the effect the assertions are about rather than for a thread count: once both
+        # handlers have logged, the absence check below is about work that has actually happened.
+        _wait_until(lambda: _logged(caplog, "client disconnected", count=2))
 
+    assert _logged(caplog, "client disconnected", count=2)
     assert [record for record in caplog.records if record.levelno >= logging.WARNING] == []
-    assert any("client disconnected" in record.message for record in caplog.records)
 
 
 def test_a_genuine_failure_outside_the_handler_is_still_an_error(caplog):
     """The disconnect exemption must not swallow everything else `handle_error` is there for."""
-    baseline = threading.active_count()
     with (
         RuntimeServer(Readiness(), host="127.0.0.1", port=0) as server,
         caplog.at_level(logging.DEBUG),
         mock.patch.object(_Handler, "handle_one_request", side_effect=RuntimeError("boom")),
     ):
         _abort(server.port, b"GET /health HTTP/1.1\r\nHost: x\r\n\r\n")
-        _wait_until(lambda: threading.active_count() <= baseline + 1)
+        # Waiting on the record the assertion is about also keeps `mock.patch` in place until the
+        # handler has actually run - tearing it down first was the other half of this race.
+        _wait_until(lambda: _logged(caplog, "runtime connection failed", level=logging.ERROR))
 
-    assert any(
-        record.levelno == logging.ERROR and "runtime connection failed" in record.message
-        for record in caplog.records
-    )
+    assert _logged(caplog, "runtime connection failed", level=logging.ERROR)
 
 
 # --- an idle connection does not own a thread forever -----------------------------------------

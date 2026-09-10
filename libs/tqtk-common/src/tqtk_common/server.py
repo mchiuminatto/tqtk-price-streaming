@@ -67,6 +67,13 @@ _JOIN_TIMEOUT_SECONDS: Final = 5.0
 # half a second added to every shutdown, including a container's termination grace period.
 _POLL_INTERVAL_SECONDS: Final = 0.05
 
+# How long a connection may sit idle before the server reclaims it. HTTP/1.1 keeps a connection
+# open after the response and `ThreadingHTTPServer` gives every connection a thread, so without
+# this an idle client holds a thread for as long as it likes and nothing bounds how many. Well
+# above any real probe or scrape interval, so it only ever fires on a connection that has gone
+# quiet - including one that never sent a byte.
+_IDLE_CONNECTION_TIMEOUT_SECONDS: Final = 10.0
+
 
 class Readiness:
     """The connection state of one service's dependencies, as `/ready` reports it.
@@ -134,6 +141,12 @@ class _RuntimeHTTPServer(ThreadingHTTPServer):
         self.readiness = readiness
         self.registry = registry
 
+    def handle_error(self, request: object, client_address: object) -> None:
+        # socketserver's default prints a traceback straight to stderr, unstructured - the one
+        # channel `configure_logging` exists to empty. `_Handler` answers its own failures; this
+        # is the backstop for anything raised outside it.
+        _log.exception("runtime connection failed", extra={"client": str(client_address)})
+
 
 def _json(status: HTTPStatus, payload: dict[str, Any]) -> _Response:
     return status, json.dumps(payload).encode() + b"\n", _JSON_CONTENT_TYPE
@@ -146,12 +159,31 @@ class _Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "tqtk-runtime/1.0"
 
+    # The stdlib's default is None - no timeout at all, so a kept-alive connection pins its
+    # thread until the client chooses to close. `handle_one_request` turns the TimeoutError this
+    # produces into a close, and logs it through `log_error` at DEBUG like any other request line.
+    timeout = _IDLE_CONNECTION_TIMEOUT_SECONDS
+
     def do_GET(self) -> None:  # the stdlib's dispatch name, not ours to rename
-        self._send(*self._route(), with_body=True)
+        self._respond(with_body=True)
 
     def do_HEAD(self) -> None:  # the stdlib's dispatch name, not ours to rename
         # Some probes send HEAD; the base class does not derive it from do_GET.
-        self._send(*self._route(), with_body=False)
+        self._respond(with_body=False)
+
+    def _respond(self, *, with_body: bool) -> None:
+        """Route and write, answering a failure in either rather than raising into socketserver."""
+        try:
+            response = self._route()
+        except Exception:  # noqa: BLE001 - a request boundary catches everything by definition
+            # Letting this propagate would close the socket with no status line written - the
+            # client sees an empty response, and the reason goes to stderr as a traceback. A
+            # scrape is wanted most when something is wrong, so the endpoint answers instead.
+            _log.exception("runtime request failed", extra={"path": self.path})
+            response = _json(
+                HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "internal error", "path": self.path}
+            )
+        self._send(*response, with_body=with_body)
 
     def _route(self) -> _Response:
         path = urlsplit(self.path).path
@@ -171,13 +203,19 @@ class _Handler(BaseHTTPRequestHandler):
         return _json(HTTPStatus.NOT_FOUND, {"error": "not found", "path": path})
 
     def _send(self, status: HTTPStatus, body: bytes, content_type: str, *, with_body: bool) -> None:
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        # Sent on HEAD too: it describes the body a GET would return.
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        if with_body:
-            self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            # Sent on HEAD too: it describes the body a GET would return.
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            if with_body:
+                self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            # A scraper that hit its own timeout and hung up. Routine rather than an error, so
+            # DEBUG with the per-request lines - and handled here so it is not a traceback.
+            _log.debug("client disconnected before the response was written")
+            self.close_connection = True
 
     def log_message(self, format: str, *args: Any) -> None:
         # The stdlib writes a line per request to stderr, unstructured. Probes and scrapes are a

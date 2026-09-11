@@ -226,5 +226,18 @@
 - [ ] 13.3 Verify failure-isolation behavior against the `platform-resilience` spec: stop
       `aggregation-svc` and confirm tick ingestion/persistence continue while bar production
       stops; restart it and confirm recovery via checkpoint.
-- [ ] 13.4 Document Compose bring-up/teardown steps (`deploy/README` or equivalent); no rollback
+- [ ] 13.4 Verify persistence-service failure isolation against the `platform-resilience` spec:
+      stop `tick-persistence-svc` (then, separately, `bar-persistence-svc`) and confirm live tick
+      ingestion and bar aggregation continue unaffected; restart the stopped service and confirm
+      buffered ticks/bars are persisted once it recovers.
+- [ ] 13.5 Verify streaming-gateway failure isolation against the `platform-resilience` spec: stop
+      `streaming-gateway-svc` and confirm LAN consumers lose the live feed while ingestion,
+      aggregation, and persistence continue unaffected; restart it and confirm consumers can
+      reconnect and resume receiving updates.
+- [ ] 13.6 Verify the recovery-time objective against the `platform-resilience` spec: for each
+      stateful component (`aggregation-svc` checkpoint recovery, a persistence service's
+      reconnect-and-drain, Redis AOF/RDB replay on restart), measure the time to resume correct
+      operation after a crash/restart and confirm it falls within the "seconds to at most a few
+      hours" target with no manual data repair.
+- [ ] 13.7 Document Compose bring-up/teardown steps (`deploy/README` or equivalent); no rollback
       procedure needed beyond standard teardown, per `design.md`'s Migration Plan.

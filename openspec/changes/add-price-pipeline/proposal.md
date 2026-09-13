@@ -20,9 +20,13 @@ plan.
   timestamps (`provider_ts`, `recv_ts`), and a `bid`/`ask` `side` on every `Bar` — two
   side-discriminated records per window, identified by
   `(provider, symbol, side, timeframe, bar_start_ts)`.
-- **feed-adapter-synthetic**: configurable-rate synthetic tick generation for the 13-symbol set
-  (6 majors + 7 crosses — the symbols present in the `data/*.parquet` tick sample are the source of
-  truth), provider tagging, `recv_ts` stamping, monotonic `seq`, publish raw ticks only.
+- **feed-adapter-synthetic**: statistically-calibrated synthetic tick generation for the 13-symbol
+  set (6 majors + 7 crosses — the symbols present in the `data/*.parquet` tick sample are the
+  source of truth): per-instrument return mean/std (`μ_I`/`σ_I`) and tick-interval mean/std
+  (`μ_It`/`σ_It`), initial price, and minimum price increment all derived from that symbol's
+  sample data; the next price follows `p_{t+1} = p_t + r_{t+1}`, `r_{t+1} ~ N(μ_I, σ_I)`, and the
+  next tick's timing follows `N(μ_It, σ_It)`; provider tagging, `recv_ts` stamping, monotonic
+  `seq`, publish raw ticks only.
 - **aggregation-svc**: per-`(provider, symbol, timeframe)` actor model, each actor holding both
   side-bars; every tick updates the forming `bid` and `ask` bars on all 8 timeframes (1s..1D),
   publishing the pair in one atomic bus operation; `recv_ts` event-time bucketing; time-driven
@@ -57,9 +61,9 @@ plan.
 - **Service runtime contract**: every service exposes `/health`, `/ready`, `/metrics`; 12-factor
   config; structured logging — provided by `tqtk-common`.
 
-Not in this change: the `dukascopy` (Java) adapter; synthetic-generator statistical fidelity
-calibration (separate change `add-synthetic-feed-fidelity`, blocked on sample data); any
-cross-provider consolidated view; LAN authentication/access control; centralized log aggregation.
+Not in this change: the `dukascopy` (Java) adapter; any cross-provider consolidated view; LAN
+authentication/access control; centralized log aggregation; time-of-day session modeling (Asia
+Pacific/Asia/London/New York) for the synthetic feed.
 
 All prior open design questions are now settled (see `docs/Architecture-Open-Questions.md`).
 
@@ -78,7 +82,9 @@ All prior open design questions are now settled (see `docs/Architecture-Open-Que
   contract surface — the versioned `ticks`/`bars` storage schema: DDL ownership following
   sole-writer ownership, additive-only evolution, declared read-side consumers, and contract tests
   on both sides.
-- `synthetic-feed`: configurable-rate synthetic tick generation, symbol set, provider tagging,
+- `synthetic-feed`: statistically-calibrated synthetic tick generation — per-instrument return and
+  tick-interval distributions derived from sample data, driving a normally-distributed biased
+  random walk for price and tick timing — symbol set, provider tagging,
   `recv_ts`/`seq`/`session_id` stamping (new `session_id` and `seq` reset to 0 per process start),
   raw-tick publication.
 - `bar-aggregation`: actor model and keying (`side` deliberately outside the actor key), per-tick

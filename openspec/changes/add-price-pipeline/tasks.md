@@ -67,16 +67,29 @@
 
 ## 5. feed-adapter-synthetic (`synthetic-feed` spec)
 
-- [ ] 5.1 Implement configurable-rate tick generation for the 13-symbol set (sourced from
-      `data/*.parquet` file names); verify a test run publishes ticks only for the configured
-      symbols and no others.
+- [x] 5.1 Implement tick generation for the 13-symbol set (sourced from `data/*.parquet` file
+      names); verify a test run publishes ticks only for the configured symbols and no others.
 - [ ] 5.2 Implement `provider="synthetic"` tagging, `recv_ts` stamping (monotonic per
       `(provider,symbol)`), and `seq`/`session_id` assignment per the data contract; verify
       `recv_ts` is non-decreasing across consecutive ticks per symbol, and a restart produces a
       new `session_id` with `seq` reset to 0.
-- [ ] 5.3 Wire tick rate to 12-factor config; verify changing the configured rate changes the
-      observed publish rate with no code change.
-- [ ] 5.4 Verify the service exposes `/health`, `/ready`, `/metrics` per the service-runtime
+- [x] 5.3 Implement per-symbol parameter derivation from sample data (`μ_I`/`σ_I` from
+      consecutive-price returns, `μ_It`/`σ_It` from consecutive `provider_ts` deltas, `p_0` as the
+      sample's first price, minimum price-change unit as the sample's smallest observed nonzero
+      price increment), computed once at startup per symbol; verify unit tests assert the computed
+      values against a fixture sample with known statistics.
+- [x] 5.4 Replace `_RandomWalk`'s uniform step with `p_t+1 = p_t + r_t+1`,
+      `r_t+1 ~ N(μ_I, σ_I)`, rounding each price to the symbol's minimum price-change unit; verify
+      a statistical test confirms a large generated sample's mean/std approximate `μ_I`/`σ_I`
+      within tolerance, and no generated price violates the rounding unit.
+- [x] 5.5 Replace the fixed `1/tick_rate_per_symbol` sleep interval with a delta sampled from
+      `N(μ_It, σ_It)`, scaled by the configured pacing multiplier; verify a statistical test
+      confirms the generated inter-tick delays approximate the scaled `N(μ_It, σ_It)` within
+      tolerance.
+- [ ] 5.6 Wire the pacing multiplier (`tick_rate_per_symbol`, reinterpreted per design.md) to
+      12-factor config; verify changing the configured multiplier changes the observed publish
+      rate with no code change.
+- [ ] 5.7 Verify the service exposes `/health`, `/ready`, `/metrics` per the service-runtime
       contract.
 
 ## 6. aggregation-svc (`bar-aggregation` spec)

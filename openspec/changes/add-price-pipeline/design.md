@@ -228,6 +228,28 @@ generated tick never carries a precision the real instrument can't represent. Sp
 unaffected by this decision — `_DEFAULT_SPREAD`/bid-ask handling stays exactly as implemented
 today, since `docs/sythetic-price.md` doesn't specify a spread model.
 
+### Calibration fitted with `pyarrow.compute`, and concurrently across symbols
+A first cut of `compute_calibration` used Python-level loops (`statistics.fmean`/`pstdev` over a
+list built by `itertools.pairwise`) — correct, but measured at ~17s to fit all 13 configured
+symbols sequentially at adapter startup (some samples run to ~1M rows), during which `/ready`
+could already report Redis connected while zero ticks were actually flowing, and the single
+synchronous computation blocked the event loop from noticing a shutdown signal. Rewritten on
+`pyarrow.compute`: `pc.subtract`/`pc.mean`/`pc.stddev` run as one vectorized pass over a whole
+column in Arrow's C++ kernels rather than the Python interpreter, and the minimum price-change
+unit is now found via `pc.round`/`pc.equal` (the smallest `decimals` a price column round-trips
+through unchanged) instead of formatting every price and taking the max digit count. Measured
+result: ~0.4s for all 13 symbols, from ~17s. Each symbol's fit also runs inside `asyncio.to_thread`
+and all 13 run concurrently via `asyncio.gather`, so the (now much smaller) cost is paid in
+parallel rather than added up serially, and never blocks the event loop at all. **Alternative
+rejected**: leave the algorithm as Python loops and only add concurrency — the concurrency alone
+does not fix the per-symbol cost, only overlaps it, and 13 threads each holding the GIL for a
+CPU-bound Python loop over ~1M rows would contend rather than genuinely parallelize; the
+vectorized kernels release the GIL, so concurrency actually buys something.
+
+This calibration step is specific to the synthetic feed - a real provider's adapter (`dukascopy`,
+Phase 2) has no equivalent, since it publishes prices a venue actually quoted rather than
+generating them from a fitted distribution.
+
 ### Bootstrap snapshot stitched server-side on `streaming-gateway-svc`
 The gateway already holds the forming bar in memory for every `(provider, symbol, timeframe)` it
 serves, so it's the only component that can produce a consistent seam without an extra round

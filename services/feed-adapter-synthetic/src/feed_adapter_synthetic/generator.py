@@ -77,6 +77,23 @@ class _RandomWalk:
         return max(delta, 0.0) / self._pacing_multiplier
 
 
+async def _compute_calibrations(
+    symbols: Sequence[str], data_dir: Path | None
+) -> dict[str, SymbolCalibration]:
+    """Fit every symbol's calibration concurrently, off the event loop.
+
+    `compute_calibration` is synchronous CPU/IO-bound work - reading and vectorizing up to a
+    ~1M-row parquet file per symbol. Awaiting it 13 times in a row on the event loop would add
+    every symbol's cost to the others' serially, and stall everything else on the loop - including
+    shutdown signal handling - for the whole window. `asyncio.to_thread` moves each call to a
+    worker thread; `gather` runs them concurrently instead of one after another.
+    """
+    results = await asyncio.gather(
+        *(asyncio.to_thread(compute_calibration, symbol, data_dir) for symbol in symbols)
+    )
+    return dict(zip(symbols, results, strict=True))
+
+
 async def _run_symbol(
     symbol: str,
     *,
@@ -144,9 +161,7 @@ async def run_synthetic_feed(
     if not symbols:
         raise ValueError("symbols must be non-empty: the adapter has nothing to generate")
     resolved_calibrations = (
-        calibrations
-        if calibrations is not None
-        else {symbol: compute_calibration(symbol, data_dir) for symbol in symbols}
+        calibrations if calibrations is not None else await _compute_calibrations(symbols, data_dir)
     )
     session = session or FeedSession()
     stop = stop or asyncio.Event()

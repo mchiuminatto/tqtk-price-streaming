@@ -87,10 +87,10 @@
       `N(μ_It, σ_It)`, scaled by the configured pacing multiplier; verify a statistical test
       confirms the generated inter-tick delays approximate the scaled `N(μ_It, σ_It)` within
       tolerance.
-- [ ] 5.6 Wire the pacing multiplier (`tick_rate_per_symbol`, reinterpreted per design.md) to
+- [x] 5.6 Wire the pacing multiplier (`tick_rate_per_symbol`, reinterpreted per design.md) to
       12-factor config; verify changing the configured multiplier changes the observed publish
       rate with no code change.
-- [ ] 5.7 Verify the service exposes `/health`, `/ready`, `/metrics` per the service-runtime
+- [x] 5.7 Verify the service exposes `/health`, `/ready`, `/metrics` per the service-runtime
       contract.
 
 ## 6. aggregation-svc (`bar-aggregation` spec)

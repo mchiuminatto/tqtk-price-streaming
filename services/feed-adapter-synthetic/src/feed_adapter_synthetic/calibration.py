@@ -5,20 +5,37 @@ distributions fitted per instrument from its sample data: `mu_I`/`sigma_I` for r
 `mu_It`/`sigma_It` for tick intervals. `p_0` and the minimum price-change unit are read from the
 same sample. `_RandomWalk` (`generator.py`) consumes a `SymbolCalibration` per symbol; this module
 only computes it.
+
+This calibration is specific to the synthetic feed - a real provider's adapter (e.g. the future
+`dukascopy` one) has no equivalent step, since it publishes prices a venue actually quoted rather
+than generating them.
+
+Every statistic here runs through `pyarrow.compute` rather than a Python-level loop: a sample can
+run to ~1M rows, and a handful of vectorized passes over the whole column (in Arrow's own C++
+kernels) is what keeps fitting all 13 configured symbols at adapter startup from being the
+multi-second-per-symbol cost a pure-Python `statistics.fmean`/`pstdev` loop over that many rows
+otherwise is.
 """
 
 from __future__ import annotations
 
-import statistics
 from dataclasses import dataclass
-from itertools import pairwise
 from pathlib import Path
 
+import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from .symbols import find_symbol_file
 
 __all__ = ["SymbolCalibration", "compute_calibration"]
+
+# FX prices are never quoted anywhere near this many decimals; a search that reached it without
+# `prices` round-tripping indicates corrupt sample data, not an instrument this model doesn't
+# support yet.
+_MAX_DECIMAL_PLACES = 8
+
+_MILLIS_PER_SECOND = 1_000.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,22 +50,24 @@ class SymbolCalibration:
     interval_stdev: float
 
 
-def _decimal_places(value: float) -> int:
-    """How many digits follow the decimal point in `value`'s shortest round-tripping form.
+def _decimal_places(prices: pa.ChunkedArray) -> int:
+    """The fewest decimal places `prices` round-trips through unchanged - the instrument's pip
+    grain, per `docs/sythetic-price.md` (a sample quoted to `1.1405` puts it at the 4th decimal,
+    `101.23` at the 2nd).
 
-    `repr` (what `str` uses for a `float`) is the shortest decimal string that reads back to the
-    same value, so for a price genuinely quoted to N decimals it recovers N exactly - except a
-    value with trailing zeros in its true precision (`1.10000`) reprs as `"1.1"`, understating it.
-    `compute_calibration` guards against that by taking the max over the whole sample rather than
-    reading a single price.
+    Rounding to fewer decimals than a price's true precision changes it; rounding to at least that
+    many is a no-op. So the smallest `decimals` where every price survives `pc.round` unchanged
+    finds the sample's precision in one vectorized pass per candidate, over the whole column at
+    once - equivalent to, but far cheaper than, formatting every price and taking the max digit
+    count. It's naturally robust to a price with trailing zeros in its true precision (`1.10000`):
+    such a price survives rounding at any `decimals`, so it never lowers the answer another price
+    forces.
     """
-    text = repr(value)
-    if "e" in text or "E" in text:
-        # Scientific notation would only appear for a price far outside any real instrument's
-        # range - fail loudly rather than guess at a decimal count.
-        raise ValueError(f"cannot infer a decimal count from {text!r}")
-    _, _, decimals = text.partition(".")
-    return len(decimals)
+    for decimals in range(_MAX_DECIMAL_PLACES + 1):
+        rounded = pc.round(prices, ndigits=decimals)
+        if pc.all(pc.equal(rounded, prices)).as_py():
+            return decimals
+    return _MAX_DECIMAL_PLACES
 
 
 def compute_calibration(symbol: str, data_dir: Path | None = None) -> SymbolCalibration:
@@ -60,24 +79,24 @@ def compute_calibration(symbol: str, data_dir: Path | None = None) -> SymbolCali
     """
     path = find_symbol_file(symbol, data_dir)
     table = pq.read_table(path, columns=["time_art", "Bid"])
-    prices: list[float] = table.column("Bid").to_pylist()
-    timestamps = table.column("time_art").to_pylist()
-    if len(prices) < 2:
+    prices = table.column("Bid")
+    timestamps = table.column("time_art")
+    n = len(prices)
+    if n < 2:
         raise ValueError(f"{path.name!r} has fewer than 2 ticks; cannot fit a distribution")
 
-    returns = [later - earlier for earlier, later in pairwise(prices)]
-    intervals = [(later - earlier).total_seconds() for earlier, later in pairwise(timestamps)]
+    earlier_prices, later_prices = prices.slice(0, n - 1), prices.slice(1, n - 1)
+    returns = pc.subtract(later_prices, earlier_prices)
 
-    # Per docs/sythetic-price.md: the minimum change position is the last decimal place present
-    # in a sample price - i.e. the instrument's pip grain, read directly off the data rather than
-    # inferred from how two ticks happen to differ.
-    decimal_places = max(_decimal_places(price) for price in prices)
+    earlier_ts, later_ts = timestamps.slice(0, n - 1), timestamps.slice(1, n - 1)
+    interval_ms = pc.cast(pc.subtract(later_ts, earlier_ts), pa.int64())
+    intervals = pc.divide(pc.cast(interval_ms, pa.float64()), _MILLIS_PER_SECOND)
 
     return SymbolCalibration(
-        initial_price=prices[0],
-        price_increment=10**-decimal_places,
-        return_mean=statistics.fmean(returns),
-        return_stdev=statistics.pstdev(returns),
-        interval_mean=statistics.fmean(intervals),
-        interval_stdev=statistics.pstdev(intervals),
+        initial_price=prices[0].as_py(),
+        price_increment=10 ** -_decimal_places(prices),
+        return_mean=pc.mean(returns).as_py(),
+        return_stdev=pc.stddev(returns, ddof=0).as_py(),
+        interval_mean=pc.mean(intervals).as_py(),
+        interval_stdev=pc.stddev(intervals, ddof=0).as_py(),
     )

@@ -112,6 +112,74 @@ def test_every_published_record_is_a_well_formed_tick():
         assert tick.ask >= tick.bid
 
 
+# --- provider tagging, recv_ts stamping, and session/seq assignment (task 5.2) ------------------
+
+
+def test_every_tick_is_tagged_with_the_synthetic_provider():
+    sink = _FakeSink()
+
+    _run(sink, max_ticks_per_symbol=2)
+
+    assert sink.published
+    assert all(tick.provider == "synthetic" for tick in sink.published)
+
+
+def test_recv_ts_is_non_decreasing_per_symbol_even_when_the_clock_goes_backwards():
+    """The data contract requires `recv_ts` monotonic per (provider, symbol); `_run_symbol` clamps
+    to `max(clock(), last_recv_ts)` precisely because a real clock is not guaranteed to always
+    advance between calls."""
+    sink = _FakeSink()
+    raw_clock_values = iter([1_000, 2_000, 1_500, 1_500, 3_000])
+
+    def backwards_clock() -> int:
+        return next(raw_clock_values)
+
+    asyncio.run(
+        run_synthetic_feed(
+            ("EURUSD",),
+            pacing_multiplier=1.0,
+            sink=sink,
+            calibrations={"EURUSD": _FIXED_CALIBRATION},
+            clock=backwards_clock,
+            sleep=_noop_sleep,
+            max_ticks_per_symbol=5,
+        )
+    )
+
+    recv_timestamps = [tick.recv_ts for tick in sink.published]
+    assert recv_timestamps == [1_000, 2_000, 2_000, 2_000, 3_000]
+    assert recv_timestamps == sorted(recv_timestamps)
+
+
+def test_a_restart_produces_a_new_session_id_with_seq_reset_to_zero():
+    """Per `tqtk_common.session.FeedSession`'s own docstring, constructing a second `FeedSession`
+    *is* what a restart means to a consumer - two separate `run_synthetic_feed` calls (each
+    defaulting to a fresh session) simulate two adapter process runs."""
+    first_sink = _FakeSink()
+    second_sink = _FakeSink()
+
+    for sink in (first_sink, second_sink):
+        asyncio.run(
+            run_synthetic_feed(
+                ("EURUSD",),
+                pacing_multiplier=1.0,
+                sink=sink,
+                calibrations={"EURUSD": _FIXED_CALIBRATION},
+                sleep=_noop_sleep,
+                max_ticks_per_symbol=3,
+            )
+        )
+
+    first_session_ids = {tick.session_id for tick in first_sink.published}
+    second_session_ids = {tick.session_id for tick in second_sink.published}
+    assert len(first_session_ids) == 1
+    assert len(second_session_ids) == 1
+    assert first_session_ids != second_session_ids
+
+    assert [tick.seq for tick in first_sink.published] == [0, 1, 2]
+    assert [tick.seq for tick in second_sink.published] == [0, 1, 2]
+
+
 # --- calibrated price generation (task 5.4): `_RandomWalk` follows `p_t+1 = p_t + N(mu_I, sigma_I)`
 # -------------------------------------------------------------------------------------------------
 

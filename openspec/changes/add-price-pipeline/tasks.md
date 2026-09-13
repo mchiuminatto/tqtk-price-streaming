@@ -69,7 +69,7 @@
 
 - [x] 5.1 Implement tick generation for the 13-symbol set (sourced from `data/*.parquet` file
       names); verify a test run publishes ticks only for the configured symbols and no others.
-- [ ] 5.2 Implement `provider="synthetic"` tagging, `recv_ts` stamping (monotonic per
+- [x] 5.2 Implement `provider="synthetic"` tagging, `recv_ts` stamping (monotonic per
       `(provider,symbol)`), and `seq`/`session_id` assignment per the data contract; verify
       `recv_ts` is non-decreasing across consecutive ticks per symbol, and a restart produces a
       new `session_id` with `seq` reset to 0.

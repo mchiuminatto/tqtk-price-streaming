@@ -196,15 +196,23 @@ instrument-specific volatility, and no realistic tick timing. Per `docs/sythetic
 symbol's generator now derives four parameters once at startup from that symbol's
 `data/*.parquet` sample: return mean `μ_I` and standard deviation `σ_I` (from consecutive-price
 differences), tick-interval mean `μ_It` and standard deviation `σ_It` (from consecutive
-`provider_ts` deltas), the sample's first price as `p_0`, and its smallest observed nonzero price
-increment as the minimum price-change unit. The next price is `p_{t+1} = p_t + r_{t+1}`,
+`provider_ts` deltas), the sample's first price as `p_0`, and its minimum price-change unit as the
+last (rightmost) decimal place present among the sample's prices — e.g. a sample quoted to
+`1.1405` puts the unit at the 4th decimal, `101.23` at the 2nd. Taken as the max decimal count
+over the whole sample, not a single price, since a value with trailing zeros in its true precision
+(`1.10000`) would otherwise understate it. The next price is `p_{t+1} = p_t + r_{t+1}`,
 `r_{t+1} ~ N(μ_I, σ_I)`; the next tick's timestamp delta is drawn `~ N(μ_It, σ_It)`. **Alternative
 rejected**: a uniform step (the prior behavior) — cheaper to compute, but produces a driftless,
 homoscedastic walk with no resemblance to real tick behavior, which is the specific defect this
 decision fixes. **Alternative rejected**: fitting a distribution offline and shipping the fitted
 parameters as static config — keeps startup cheap, but adds a build step that silently goes stale
 if `data/*.parquet` is refreshed without re-running it; deriving on startup keeps the sample file
-as the only source of truth (consistent with symbol-set discovery, above).
+as the only source of truth (consistent with symbol-set discovery, above). **Alternative
+rejected**: deriving the minimum price-change unit statistically, as the smallest nonzero
+difference between consecutive prices — works, but ties a structural property of the instrument
+(how many decimals it's quoted to) to whether two ticks happen to differ by exactly one unit
+somewhere in the sample; reading the decimal count directly off the price values is simpler and
+doesn't depend on that coincidence.
 
 `tick_rate_per_symbol` (`FeedConfig`) changes meaning from an absolute rate to a pacing multiplier
 against the derived `μ_It`: `1.0` (default) publishes at the sample's own mean cadence, `>1.0`

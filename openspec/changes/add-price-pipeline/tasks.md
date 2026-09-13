@@ -75,9 +75,10 @@
       new `session_id` with `seq` reset to 0.
 - [x] 5.3 Implement per-symbol parameter derivation from sample data (`μ_I`/`σ_I` from
       consecutive-price returns, `μ_It`/`σ_It` from consecutive `provider_ts` deltas, `p_0` as the
-      sample's first price, minimum price-change unit as the sample's smallest observed nonzero
-      price increment), computed once at startup per symbol; verify unit tests assert the computed
-      values against a fixture sample with known statistics.
+      sample's first price, minimum price-change unit as the last decimal place present among the
+      sample's prices, taken as the max over the whole sample), computed once at startup per
+      symbol; verify unit tests assert the computed values against a fixture sample with known
+      statistics.
 - [x] 5.4 Replace `_RandomWalk`'s uniform step with `p_t+1 = p_t + r_t+1`,
       `r_t+1 ~ N(μ_I, σ_I)`, rounding each price to the symbol's minimum price-change unit; verify
       a statistical test confirms a large generated sample's mean/std approximate `μ_I`/`σ_I`

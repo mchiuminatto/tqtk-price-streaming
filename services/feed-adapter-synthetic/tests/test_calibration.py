@@ -46,7 +46,8 @@ def test_derives_parameters_matching_a_fixture_samples_known_statistics(tmp_path
     expected_intervals = [(later - earlier) / 1000 for earlier, later in pairwise(_TIMES_MS)]
 
     assert calibration.initial_price == pytest.approx(_BIDS[0])
-    # Smallest nonzero |diff| among [1e-05, 2e-05, -1e-05, 0.0] is 1e-05.
+    # Max decimal count among the Bids: 1.10000 -> 1 (trailing zeros drop out of repr), the rest
+    # -> 5, so the minimum change position lands on the 5th decimal.
     assert calibration.price_increment == pytest.approx(1e-05)
     assert calibration.return_mean == pytest.approx(statistics.fmean(expected_returns))
     assert calibration.return_stdev == pytest.approx(statistics.pstdev(expected_returns))
@@ -65,24 +66,78 @@ def test_derives_from_bid_not_the_bid_ask_mid(tmp_path: Path):
     assert calibration.initial_price != pytest.approx((_BIDS[0] + _ASKS[0]) / 2)
 
 
-# --- error handling on a degenerate sample ------------------------------------------------------
+# --- minimum change position: the last decimal place present, per docs/sythetic-price.md --------
 
 
-def test_raises_on_a_sample_with_no_price_movement(tmp_path: Path):
+def test_derives_the_minimum_change_position_from_the_last_decimal_place(tmp_path: Path):
+    """The doc's own examples: 1.1405 -> 4th decimal, 101.23 -> 2nd decimal."""
+    cases = [
+        ("EURUSD", [1.1400, 1.1405], 1e-04),
+        ("USDJPY", [101.20, 101.23], 1e-02),
+    ]
+    for symbol, prices, expected_increment in cases:
+        table = pa.table(
+            {
+                "time_art": pa.array(
+                    [_EPOCH, _EPOCH + dt.timedelta(seconds=1)], type=pa.timestamp("ms")
+                ),
+                "Ask": pa.array([p + 0.0002 for p in prices], type=pa.float64()),
+                "Bid": pa.array(prices, type=pa.float64()),
+            }
+        )
+        pq.write_table(table, tmp_path / f"{symbol}_Ticks_2026.01.01_2026.01.02.parquet")
+
+        calibration = compute_calibration(symbol, tmp_path)
+
+        assert calibration.price_increment == pytest.approx(expected_increment)
+
+
+def test_minimum_change_position_takes_the_max_decimal_count_over_the_whole_sample(
+    tmp_path: Path,
+):
+    """A price with trailing zeros in its true precision (`1.10000`) reprs with fewer decimals
+    than it actually has - taking the max over the sample recovers the true precision regardless
+    of which price is checked first."""
+    table = pa.table(
+        {
+            "time_art": pa.array(
+                [_EPOCH, _EPOCH + dt.timedelta(seconds=1), _EPOCH + dt.timedelta(seconds=2)],
+                type=pa.timestamp("ms"),
+            ),
+            "Ask": pa.array([1.10020, 1.10020, 1.10041], type=pa.float64()),
+            "Bid": pa.array([1.10000, 1.10000, 1.10021], type=pa.float64()),
+        }
+    )
+    pq.write_table(table, tmp_path / "EURUSD_Ticks_2026.01.01_2026.01.02.parquet")
+
+    calibration = compute_calibration("EURUSD", tmp_path)
+
+    assert calibration.price_increment == pytest.approx(1e-05)
+
+
+def test_a_flat_sample_computes_a_valid_calibration_with_zero_return_variance(tmp_path: Path):
+    """The minimum change position no longer depends on any nonzero return (see calibration.py) -
+    a flat sample computes cleanly rather than raising."""
     table = pa.table(
         {
             "time_art": pa.array(
                 [_EPOCH, _EPOCH + dt.timedelta(seconds=1)],
                 type=pa.timestamp("ms"),
             ),
-            "Ask": pa.array([1.1002, 1.1002], type=pa.float64()),
-            "Bid": pa.array([1.1000, 1.1000], type=pa.float64()),
+            "Ask": pa.array([1.10043, 1.10043], type=pa.float64()),
+            "Bid": pa.array([1.10023, 1.10023], type=pa.float64()),
         }
     )
     pq.write_table(table, tmp_path / "FLAT_Ticks_2026.01.01_2026.01.02.parquet")
 
-    with pytest.raises(ValueError, match="no price movement"):
-        compute_calibration("FLAT", tmp_path)
+    calibration = compute_calibration("FLAT", tmp_path)
+
+    assert calibration.return_mean == 0.0
+    assert calibration.return_stdev == 0.0
+    assert calibration.price_increment == pytest.approx(1e-05)
+
+
+# --- error handling on a degenerate sample ------------------------------------------------------
 
 
 def test_raises_on_a_sample_with_fewer_than_two_ticks(tmp_path: Path):

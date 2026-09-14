@@ -1,4 +1,4 @@
-# Tick Price Emition
+# Tick Price Emitter
 
 ## Context
 
@@ -8,89 +8,55 @@ The underlying process to generate the next period price is stochastic and follo
 
 The estimated values are:
 
-Bid price: Estimated based on the corresponding tick returns distribution for each instrument.
-
-Spread: Estimated based on the spread distribution for each instrument.
-
-Ask price: Calculated as Bid + Spread
-
-Time interval: Next tick timestamp calculated on the interval distribution corresponding for rach instrument.
-
+- Bid price: Estimated based on the corresponding tick returns distribution for each instrument.
+- Spread: Estimated based on the spread distribution for each instrument.
+- Ask price: Calculated as Bid + Spread
+- Time interval: Next tick timestamp calculated on the interval distribution corresponding for each instrument.
 
 ## How to calculate
 
-As stated above, four calculations are necessary.
+As stated above, four calculations are necessary:
 
-Let be:
+### t+1
 
-- $p_0$ the initial price of the series.
-- $\mu_I$: Mean of returns for the instrument I
-- $\sigma_I$ Standard deviation for returns for instrument I
-- $p_t$ Price at period t
-- $p_{t+1}: Pirce at petiod t+1
-
-To claculate the next price
-
-$\Large p_t+1 = p_t + r_{t+1}$
-
-Where $\Large r_{t+1} \leftarrow N(\mu_I, \sigma_I)$
-
-Is the return obtained from the normal distribution $N$ of mean $\mu_I$ and standard deviation $\sigma_I$
-
-The trend can be controlled using the value of $\mu_I$ as follows:
-
-$$
-Trend_I =
-
-\begin {cases}Long & \mu_I > 0 \\
-
-Range & \mu_I = 0 \\
-
-Short & \mu_I < 0
-
-\end{cases}
-$$
-
-## Generation Frequency
-
-Calculate the frequecny at which tick are generated as follows:
-
-Let be:
-
-- $\Large \mu_{I_t}$ the mean interval at which ticks are recorded.
-- $\Large \sigma_{I_t}$ the standrad deviation of the intervals at which ticks are recorded.
-- $t_i$, timestamp of the tick at time t
-
-The timestamp for the next tick is claculated as follows:
-
-$\Large t_{t+1} = \delta_{I_t} + t_i $
+$\Large t_{I_{t+1}} = D_{TI}(parameters_{TI})$
 
 Where:
 
-$\Large \delta_{I_t} <- N_I(\mu_{I_t}, \sigma_{I_t})$
+- $t_{I_{t+1}}$ Is the timestamp for the next tick for the instrument I.
+- $D_{TI}(parameters_{TI})$ Is the time interval distribution, and its parameters, for the instrument I. Consider the mapping between instrument, its distribution (and distribution parameters) described in this document: `docs/tick-interval-distributions.md`
 
-Where $N_I$ is the normal distribution for tick intervals for instrument I, with mean $\mu_{I_t}$ and standard deviation $\sigma_{I_t}$
+### Bid.
 
-## Parameters
+$\Large bid_{I_{t+1}} = bid_{I_{t}} + D_{RI}(parameters_{RI})$
 
-The following table describes the model parameters and how are obtained.
+Where:
 
+- $bid_{I_{t+1}}$: Bid price at timestamp t+1 for instrument I
+- $bid_{I_{t}}$: Bid price at timestamp t for instrument I
+- $D_{RI}(parameters_{RI})$: Tick return's distribution, and its parameters for instrument I. Consider the mapping between instrument, its distribution (and distribution parameters) described in this document: `docs/tick-distributions.md`
 
-| Parameter         | Description                                  | Source                        | Data type | Note                                                           |
-| ----------------- | -------------------------------------------- | ----------------------------- | --------- | -------------------------------------------------------------- |
-| $\mu_I$           | Return's mean for instrument I               | Calculated from sample data   | float     | Feeds the normal-distribution sampler, which is float-only     |
-| $\sigma_I$        | Return's standard deviation for instrument I | Calculated from sample data   | float     | Feeds the normal-distribution sampler, which is float-only     |
-| $p_0$             | First price of the series for instrument I   | Obtained from sample data     | Decimal   | A price value - see Constraints                                |
-| $unit{-}position$ | Position of the minimum changing value       | Obtained from the sample data | Decimal   | Stored as the increment value (e.g.`0.0001`), not the position |
-| $\mu_{I_t}$       | Tick interval mean                           | Calculated from sample data   | float     | A time value, not a price                                      |
-| $\sigma_{I_t}$    | Tick interval standard deviation             | Calculated from sample data   | float     | A time value, not a price                                      |
+Note:
+
+The addition must be done at the minimum change decimal position. See: Minimum change position below.
+
+### Spread.
+
+$Spread_{I_{t+1}} = D_{SI}(parameters_{SI})$
+
+Where:
+
+- $Spread_{I_{t+1}}$: Spread at timestamp t+1 for instrument I.
+- $D_{SI}(parameters_{SI})$: Spread distribution and its parameters for instrument I. Consider the mapping between instrument and its spread distribution (and its distribution parameters) described in this document. `docs/spread-distributions.md`
+
+### Ask.
+
+$Ask_{I_{t+1}} = Bid_{I{t+1}} + Spread_{I{t+1}}$
+
+## Minimum change position.
+
+Is the decimal position where a change in one unit (pip, contract) is reflected. Use as reference the following document: `docs/minimum-change-position.md`
 
 ## Constraints
 
 For precision purposes DO NOT use float as datatype for prices, instead work with decimal standard library.
-
-This applies to $p_t$, $p_{t+1}$, $r_{t+1}$, $p_0$, and the minimum-change-position increment: every
-price value and every value derived directly from a price (a return, the running walk state, the
-rounded/published price) is a `Decimal`, never a `float`. $\mu_I$ and $\sigma_I$ are the exception:
-they parameterize the normal distribution sampler, which is float-only, so the sampled return is
-converted to `Decimal` immediately after being drawn, before it is added to the price.

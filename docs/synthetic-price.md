@@ -4,17 +4,22 @@
 
 Generate synthetic tick price based on real data sample. The emission needs to follow a biased random walk.
 
-The underlying process to generate the next period price is stochasticn and follows a normal distribution.
+The underlying process to generate the next period price is stochastic and follows a distribution that is particular for each symbol.
 
-The variables to calculate the next value in the tick time series are the following
+The estimated values are:
 
-* Returns: Difference between current price and previous one.
-* Volatility: Calculated from the return's standard deviation.
-* Tick Frequency: How many ticks per time unit.
-* Initial Price: Parameter
-* Minimum Change Position: Position in the price value at which a unit change is incorporated. Inferred directly from the sample data: it is the position of the last (rightmost) decimal digit present in a sample price value. For example, for a value of 1.1405, the minimum change position is the 4th decimal place. For a value of 101.23, the minimum change position is the 2nd decimal place.
+Bid price: Estimated based on the corresponding tick returns distribution for each instrument.
 
-### How to calculate
+Spread: Estimated based on the spread distribution for each instrument.
+
+Ask price: Calculated as Bid + Spread
+
+Time interval: Next tick timestamp calculated on the interval distribution corresponding for rach instrument.
+
+
+## How to calculate
+
+As stated above, four calculations are necessary.
 
 Let be:
 
@@ -46,7 +51,6 @@ Short & \mu_I < 0
 \end{cases}
 $$
 
-
 ## Generation Frequency
 
 Calculate the frequecny at which tick are generated as follows:
@@ -72,11 +76,21 @@ Where $N_I$ is the normal distribution for tick intervals for instrument I, with
 The following table describes the model parameters and how are obtained.
 
 
-| Parameter         | Description                                  | Source                        | Note |
-| ----------------- | -------------------------------------------- | ----------------------------- | ---- |
-| $\mu_I$           | Return's mean for instrument I               | Calculated from sample data   |      |
-| $\sigma_I$        | Return's standard deviation for instrument I | Calculated from sample data   |      |
-| $p_0$             | First price of the series for instrument I   | Obtained from sample data     |      |
-| $unit{-}position$ | Position of the minimum changing value       | Obtained from the sample data |      |
-| $\mu_{I_t}$       | Tick interval mean                           | Calculated from sample data   |      |
-| $\sigma_{I_t}$    | Tick interval standard deviation             | Calculated from sample data   |      |
+| Parameter         | Description                                  | Source                        | Data type | Note                                                           |
+| ----------------- | -------------------------------------------- | ----------------------------- | --------- | -------------------------------------------------------------- |
+| $\mu_I$           | Return's mean for instrument I               | Calculated from sample data   | float     | Feeds the normal-distribution sampler, which is float-only     |
+| $\sigma_I$        | Return's standard deviation for instrument I | Calculated from sample data   | float     | Feeds the normal-distribution sampler, which is float-only     |
+| $p_0$             | First price of the series for instrument I   | Obtained from sample data     | Decimal   | A price value - see Constraints                                |
+| $unit{-}position$ | Position of the minimum changing value       | Obtained from the sample data | Decimal   | Stored as the increment value (e.g.`0.0001`), not the position |
+| $\mu_{I_t}$       | Tick interval mean                           | Calculated from sample data   | float     | A time value, not a price                                      |
+| $\sigma_{I_t}$    | Tick interval standard deviation             | Calculated from sample data   | float     | A time value, not a price                                      |
+
+## Constraints
+
+For precision purposes DO NOT use float as datatype for prices, instead work with decimal standard library.
+
+This applies to $p_t$, $p_{t+1}$, $r_{t+1}$, $p_0$, and the minimum-change-position increment: every
+price value and every value derived directly from a price (a return, the running walk state, the
+rounded/published price) is a `Decimal`, never a `float`. $\mu_I$ and $\sigma_I$ are the exception:
+they parameterize the normal distribution sampler, which is float-only, so the sampled return is
+converted to `Decimal` immediately after being drawn, before it is added to the price.

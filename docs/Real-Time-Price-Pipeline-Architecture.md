@@ -15,7 +15,7 @@
 ## Decisions (resolved)
 
 1. **Providers, phased.** `synthetic` (a configurable-rate Python tick generator) is the only **active** provider — build and run the whole pipeline against it now. `dukascopy` (real market data) is **deferred to Phase 2**: Dukascopy's JForex-API is officially **Java-only** (no Python bindings), and the only officially-supported language-agnostic path — Dukascopy's FIX 4.4 API — requires a **$100,000 minimum deposit** or institutional "External Service Provider" approval, which isn't available now. Revisit when ready to build the Java/JForex component (or if FIX API eligibility changes).
-2. **Symbol set**: 13 pairs — the symbols present in the delivered tick-sample data (`data/*.parquet`) are the source of truth. 6 majors (EURUSD, GBPUSD, AUDUSD, USDCAD, USDJPY, USDCHF) + 7 crosses (AUDJPY, EURGBP, EURJPY, GBPJPY, NZDJPY, NZDUSD, USDCNH) — for whichever provider is active (synthetic now; Dukascopy when added).
+2. **Symbol set**: 17 symbols — the symbols present in the delivered tick-sample data (`data/*.parquet`) are the source of truth. 13 FX pairs: 6 majors (EURUSD, GBPUSD, AUDUSD, USDCAD, USDJPY, USDCHF) + 7 crosses (AUDJPY, EURGBP, EURJPY, GBPJPY, NZDJPY, NZDUSD, USDCNH); plus 4 non-FX instruments: 2 equity CFDs (AAPLUSUSD, ARKQUSUSD) + 2 index CFDs (USA500IDXUSD, USATECHIDXUSD) — for whichever provider is active (synthetic now; Dukascopy when added).
 3. **No cross-provider consolidated view.** Confirmed — per-provider tagging only, no blending, even once a second provider is active. Averaging "real" vs. "synthetic" (or two real providers with different microstructure) would be meaningless; any future consolidated view is a distinct, explicitly-labeled derived service, not a default behavior.
 4. **External consumers**: same LAN, separate host from the pipeline itself.
 5. **Aggregated-price SLA = live intrabar updates.** Every tick updates the currently-forming bar's O/H/L/C, not just the bar-close event.
@@ -23,7 +23,7 @@
 7. **Phase 1 scope**: the architecture stays multi-provider-ready (provider tagging, dynamic stream discovery, per-(provider,symbol) keys) end-to-end, but only the `synthetic` provider is built and deployed today. Adding `dukascopy` later is a new `feed-adapter-dukascopy` deployment — no redesign of `aggregation-svc` or anything downstream.
 8. **Synthetic generator fidelity**: the generator must approximate Dukascopy's real tick-rate and statistical properties, not just produce a naive random walk — it's the sole active data source for an extended period, and Phase 1 results need to be meaningfully comparable once Phase 2 (real data) arrives.
 9. **LAN gateway auth**: LAN-only network trust is sufficient for this stage — no authentication/access-control layer required yet. Revisit if the trust boundary changes (e.g., more hosts join the LAN).
-10. **aggregation-svc scaling**: confirmed — starts as a single shared instance across the active provider(s) and all 13 symbols.
+10. **aggregation-svc scaling**: confirmed — starts as a single shared instance across the active provider(s) and all 17 symbols.
 11. **Dukascopy (Phase 2) approach**: will be implemented as a Java component exposing prices over a **WebSocket** interface, built later. Implementation detail deferred until Phase 2 starts: whether a thin bridge republishes the WebSocket feed into Redis (preserving the existing `ticks.raw.dukascopy.{symbol}` contract) or downstream services consume the WebSocket directly.
 
 ## Scope and assumptions
@@ -124,7 +124,7 @@ Bar:   { provider, symbol, side, timeframe, bar_start_ts, open, high, low, close
 
 Redis streams: `ticks.raw.{provider}.{symbol}`, `bars.{timeframe}.{provider}.{symbol}`. Postgres/TimescaleDB: `ticks` hypertable indexed on `(provider, symbol, recv_ts)`, partitioned on `recv_ts`; `bars` hypertable indexed on `(provider, symbol, side, timeframe, bar_start_ts)`, prices as typed `double precision` columns.
 
-**The bid/ask side dimension.** A bar is a bid series or an ask series — there is no single "the price" for an FX window — so every window produces **two** records, `side = "bid"` and `side = "ask"`, built from that side's price on each contributing tick, with identical `tick_count`. `side` is a field of the record, deliberately **not** a segment of the stream name: bar streams carry both sides (stream count stays 104, and the trim policy and checkpoint keys are untouched), while the aggregation actor stays keyed `(provider, symbol, timeframe)` and holds both side-bars, publishing the pair in one atomic bus operation. There is no `mid` side — consumers derive it. The split doubles LAN bar-message volume to **~6,240 msgs/sec** and persisted bar rows to **~27/sec (~2.3M/day)**; ticks are unaffected, since a `Tick` already carried both sides.
+**The bid/ask side dimension.** A bar is a bid series or an ask series — there is no single "the price" for an FX window — so every window produces **two** records, `side = "bid"` and `side = "ask"`, built from that side's price on each contributing tick, with identical `tick_count`. `side` is a field of the record, deliberately **not** a segment of the stream name: bar streams carry both sides (stream count stays 136, and the trim policy and checkpoint keys are untouched), while the aggregation actor stays keyed `(provider, symbol, timeframe)` and holds both side-bars, publishing the pair in one atomic bus operation. There is no `mid` side — consumers derive it. The split doubles LAN bar-message volume to **~8,160 msgs/sec** and persisted bar rows to **~35/sec (~3.0M/day)**; ticks are unaffected, since a `Tick` already carried both sides.
 
 ### Two contract surfaces, both versioned
 
@@ -157,16 +157,18 @@ This budget covers tick-received → bar-published-to-Redis. Delivery from strea
 
 External consumers are same-LAN, separate host — not localhost, not open internet. Consequence: streaming-gateway-svc and historical-query-svc (or edge-gateway, if used) need to bind to a LAN-reachable interface rather than `127.0.0.1`. Per decision #9, LAN network trust is sufficient at this stage — no authentication or access-control layer (API key, LAN-scoped auth) is added now; revisit if the trust boundary changes. LAN round-trip latency is typically sub-millisecond to a few ms depending on network quality — small compared to the internal budget, but it's a genuinely separate number from the internal <10ms figure, not part of it.
 
-## Redis memory sizing (concrete, Phase 1: 13 symbols × 1 active provider)
+## Redis memory sizing (concrete, Phase 1: 17 symbols × 1 active provider)
 
-13 `(provider, symbol)` combinations (`synthetic` only, for now). At a representative ~30 ticks/sec/pair (combined bid/ask, retail-feed order of magnitude) × 13 ≈ 390 ticks/sec total, ~100–150 bytes/stream-entry:
+17 `(provider, symbol)` combinations (`synthetic` only, for now — 13 FX pairs plus 4 non-FX
+instruments). At a representative ~30 ticks/sec/pair (combined bid/ask, retail-feed order of
+magnitude) × 17 ≈ 510 ticks/sec total, ~100–150 bytes/stream-entry:
 
 | Retention window | Approx. memory |
 |---|---|
-| 4–6 hours | roughly 700MB–1.1GB |
-| 24 hours | roughly 4.3–5.4GB |
+| 4–6 hours | roughly 900MB–1.4GB |
+| 24 hours | roughly 5.7–7.1GB |
 
-This **roughly doubles** once `dukascopy` is added as a second active provider (26 combinations: ~1.4–2.2GB for 4–6h, ~8.7–10.8GB for 24h) — worth budgeting Redis memory for that from the start even though it isn't needed yet. The synthetic provider's rate is fully controllable — dial it down for routine testing, or up to stress-test the aggregation-svc hop specifically.
+This **roughly doubles** once `dukascopy` is added as a second active provider (34 combinations: ~1.8–2.8GB for 4–6h, ~11.2–14.2GB for 24h) — worth budgeting Redis memory for that from the start even though it isn't needed yet. The synthetic provider's rate is fully controllable — dial it down for routine testing, or up to stress-test the aggregation-svc hop specifically.
 
 ## Failure isolation (blast radius per service, Phase 1)
 

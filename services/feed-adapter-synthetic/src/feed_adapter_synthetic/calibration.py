@@ -1,31 +1,35 @@
-"""Per-instrument statistical parameters fitted from the sample tick data.
+"""Per-instrument price model, fitted/looked up for the synthetic feed - see `docs/synthetic-price.md`.
 
-`docs/sythetic-price.md` specifies the synthetic feed's price and tick-timing model as two normal
-distributions fitted per instrument from its sample data: `mu_I`/`sigma_I` for returns and
-`mu_It`/`sigma_It` for tick intervals. `p_0` and the minimum price-change unit are read from the
-same sample. `_RandomWalk` (`generator.py`) consumes a `SymbolCalibration` per symbol; this module
-only computes it.
+Per that doc, generation needs four things per symbol: `p_0` and the minimum price-change unit
+(both read directly from the sample data, below), plus a return distribution, a spread
+distribution, and a tick-interval distribution (each a fitted family + parameters, looked up from
+`distributions.py` - the executable form of `docs/tick-distributions.md`,
+`docs/spread-distributions.md`, and `docs/tick-interval-distributions.md`). Per the doc's
+Constraints section, `p_0` and the minimum price-change unit are prices and are represented as
+`Decimal`. `_RandomWalk` (`generator.py`) consumes a `SymbolCalibration` per symbol; this module
+only assembles it.
 
 This calibration is specific to the synthetic feed - a real provider's adapter (e.g. the future
 `dukascopy` one) has no equivalent step, since it publishes prices a venue actually quoted rather
 than generating them.
-
-Every statistic here runs through `pyarrow.compute` rather than a Python-level loop: a sample can
-run to ~1M rows, and a handful of vectorized passes over the whole column (in Arrow's own C++
-kernels) is what keeps fitting all 13 configured symbols at adapter startup from being the
-multi-second-per-symbol cost a pure-Python `statistics.fmean`/`pstdev` loop over that many rows
-otherwise is.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
+from .distributions import (
+    INTERVAL_DISTRIBUTIONS,
+    RETURN_DISTRIBUTIONS,
+    SPREAD_DISTRIBUTIONS,
+    Distribution,
+)
 from .symbols import find_symbol_file
 
 __all__ = ["SymbolCalibration", "compute_calibration"]
@@ -35,25 +39,22 @@ __all__ = ["SymbolCalibration", "compute_calibration"]
 # support yet.
 _MAX_DECIMAL_PLACES = 8
 
-_MILLIS_PER_SECOND = 1_000.0
-
 
 @dataclass(frozen=True, slots=True)
 class SymbolCalibration:
-    """One symbol's price/timing model, fitted from its `data/*.parquet` sample."""
+    """One symbol's price/timing model - see module docstring."""
 
-    initial_price: float
-    price_increment: float
-    return_mean: float
-    return_stdev: float
-    interval_mean: float
-    interval_stdev: float
+    initial_price: Decimal
+    price_increment: Decimal
+    return_distribution: Distribution
+    spread_distribution: Distribution
+    interval_distribution: Distribution
 
 
 def _decimal_places(prices: pa.ChunkedArray) -> int:
     """The fewest decimal places `prices` round-trips through unchanged - the instrument's pip
-    grain, per `docs/sythetic-price.md` (a sample quoted to `1.1405` puts it at the 4th decimal,
-    `101.23` at the 2nd).
+    grain, per `docs/minimum-change-position.md` (a sample quoted to `1.1405` puts it at the 4th
+    decimal, `101.23` at the 2nd).
 
     Rounding to fewer decimals than a price's true precision changes it; rounding to at least that
     many is a no-op. So the smallest `decimals` where every price survives `pc.round` unchanged
@@ -71,32 +72,36 @@ def _decimal_places(prices: pa.ChunkedArray) -> int:
 
 
 def compute_calibration(symbol: str, data_dir: Path | None = None) -> SymbolCalibration:
-    """Fit `SymbolCalibration` for `symbol` from its sample file under `data_dir`.
+    """Assemble `SymbolCalibration` for `symbol`.
 
-    Uses the sample's `Bid` column (not the `Bid`/`Ask` mid) as the calibrated price series:
-    averaging the two introduces sub-pip floating-point noise, since `Bid` and `Ask` tick
-    independently at the instrument's real pip grain.
+    `initial_price` and `price_increment` are read from `symbol`'s sample file under `data_dir`
+    (its `Bid` column, not the `Bid`/`Ask` mid: averaging the two introduces sub-pip
+    floating-point noise, since `Bid` and `Ask` tick independently at the instrument's real pip
+    grain). The return/spread/interval distributions are not re-derived from that sample on every
+    call - they're looked up from `distributions.py`'s fixed per-symbol tables (see that module's
+    docstring for why).
     """
     path = find_symbol_file(symbol, data_dir)
-    table = pq.read_table(path, columns=["time_art", "Bid"])
+    table = pq.read_table(path, columns=["Bid"])
     prices = table.column("Bid")
-    timestamps = table.column("time_art")
-    n = len(prices)
-    if n < 2:
-        raise ValueError(f"{path.name!r} has fewer than 2 ticks; cannot fit a distribution")
+    if len(prices) < 1:
+        raise ValueError(f"{path.name!r} has no ticks; cannot calibrate")
 
-    earlier_prices, later_prices = prices.slice(0, n - 1), prices.slice(1, n - 1)
-    returns = pc.subtract(later_prices, earlier_prices)
-
-    earlier_ts, later_ts = timestamps.slice(0, n - 1), timestamps.slice(1, n - 1)
-    interval_ms = pc.cast(pc.subtract(later_ts, earlier_ts), pa.int64())
-    intervals = pc.divide(pc.cast(interval_ms, pa.float64()), _MILLIS_PER_SECOND)
+    try:
+        return_distribution = RETURN_DISTRIBUTIONS[symbol]
+        spread_distribution = SPREAD_DISTRIBUTIONS[symbol]
+        interval_distribution = INTERVAL_DISTRIBUTIONS[symbol]
+    except KeyError as exc:
+        raise ValueError(
+            f"no fitted return/spread/interval distribution for symbol {symbol!r} in "
+            "distributions.py - add it per docs/tick-distributions.md, "
+            "docs/spread-distributions.md, and docs/tick-interval-distributions.md"
+        ) from exc
 
     return SymbolCalibration(
-        initial_price=prices[0].as_py(),
-        price_increment=10 ** -_decimal_places(prices),
-        return_mean=pc.mean(returns).as_py(),
-        return_stdev=pc.stddev(returns, ddof=0).as_py(),
-        interval_mean=pc.mean(intervals).as_py(),
-        interval_stdev=pc.stddev(intervals, ddof=0).as_py(),
+        initial_price=Decimal(str(prices[0].as_py())),
+        price_increment=Decimal(1).scaleb(-_decimal_places(prices)),
+        return_distribution=return_distribution,
+        spread_distribution=spread_distribution,
+        interval_distribution=interval_distribution,
     )

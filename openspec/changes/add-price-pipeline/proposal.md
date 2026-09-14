@@ -20,9 +20,10 @@ plan.
   timestamps (`provider_ts`, `recv_ts`), and a `bid`/`ask` `side` on every `Bar` — two
   side-discriminated records per window, identified by
   `(provider, symbol, side, timeframe, bar_start_ts)`.
-- **feed-adapter-synthetic**: statistically-calibrated synthetic tick generation for the 13-symbol
-  set (6 majors + 7 crosses — the symbols present in the `data/*.parquet` tick sample are the
-  source of truth): per-instrument return mean/std (`μ_I`/`σ_I`) and tick-interval mean/std
+- **feed-adapter-synthetic**: statistically-calibrated synthetic tick generation for the 17-symbol
+  set (13 FX pairs: 6 majors + 7 crosses; plus 4 non-FX instruments: 2 equity CFDs and 2 index
+  CFDs — the symbols present in the `data/*.parquet` tick sample are the source of truth):
+  per-instrument return mean/std (`μ_I`/`σ_I`) and tick-interval mean/std
   (`μ_It`/`σ_It`), initial price, and minimum price increment all derived from that symbol's
   sample data; the next price follows `p_{t+1} = p_t + r_{t+1}`, `r_{t+1} ~ N(μ_I, σ_I)`, and the
   next tick's timing follows `N(μ_It, σ_It)`; provider tagging, `recv_ts` stamping, monotonic

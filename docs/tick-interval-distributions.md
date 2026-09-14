@@ -3,8 +3,9 @@
 Companion to [`tick-distributions.md`](./tick-distributions.md) (returns) and
 [`spread-distributions.md`](./spread-distributions.md) (`Ask - Bid`). This one covers tick
 interval — the time elapsed between two consecutive ticks (`time_art[t] - time_art[t-1]`, in
-seconds), which is what `docs/synthetic-price.md` models as `N(μ_It, σ_It)` and `calibration.py`
-fits as `interval_mean`/`interval_stdev`.
+seconds), which `docs/synthetic-price.md` originally modeled as one fixed `N(μ_It, σ_It)` for
+every symbol and `calibration.py` fit online as `interval_mean`/`interval_stdev`. The result below
+is why both now use a per-symbol fitted distribution instead (see Status).
 
 ## Method
 
@@ -79,10 +80,9 @@ analysis intentionally did **not** exclude the gaps either, to stay consistent w
 
 ## Status
 
-Analysis only — no production code changed. `docs/synthetic-price.md` and `calibration.py`
-continue to model tick interval as `N(μ_It, σ_It)`. Adopting a per-symbol fitted interval
-distribution instead would mean: a distribution-family field (plus its params) on
-`SymbolCalibration`, a sampler in `_RandomWalk.next_interval` that isn't `random.gauss`, a decision
-on whether to exclude overnight/weekend gaps from the fit (as the fidelity spec already does for
-its own metrics) or keep them in as this table does, and updates to `docs/synthetic-price.md` —
-not done here.
+**Adopted, gaps included.** `distributions.py`'s `INTERVAL_DISTRIBUTIONS` carries each symbol's
+exact family and parameters from the table above - fit with the overnight/weekend gaps left in,
+consistent with what this doc characterizes (see the Caveat above), not with the
+fidelity-acceptance spec's gap-excluded metrics. `SymbolCalibration.interval_distribution`/
+`_RandomWalk.next_interval` sample from it; `docs/synthetic-price.md` now specifies this per-symbol
+model in place of the old fixed `N(μ_It, σ_It)`.

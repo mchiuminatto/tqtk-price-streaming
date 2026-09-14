@@ -1,36 +1,39 @@
 """Verification for tasks 5.1, 5.4, and 5.5: tick generation scoped to exactly the configured
-symbol set, and the calibrated price/pacing model from `docs/sythetic-price.md`.
+symbol set, and the calibrated price/pacing model from `docs/synthetic-price.md`.
 
 `sleep` is a no-op and `max_ticks_per_symbol` bounds each run, so these assert the generator's own
 behavior deterministically rather than depending on wall-clock timing. Structural tests inject a
-zero-variance `SymbolCalibration` so they don't depend on random price movement; the calibrated
-distribution itself is verified separately, directly against `_RandomWalk`.
+`"constant"`-family `SymbolCalibration` so they don't depend on random price movement; individual
+distribution families are verified for statistical correctness separately, in
+`test_distributions.py` - the tests here integration-test `_RandomWalk`'s use of them (the
+`Decimal` walk, quantization, and `ask = bid + spread`).
 """
 
 from __future__ import annotations
 
 import asyncio
 import statistics
+from decimal import Decimal
 from itertools import pairwise
 
 import pytest
 from feed_adapter_synthetic.calibration import SymbolCalibration
+from feed_adapter_synthetic.distributions import Distribution
 from feed_adapter_synthetic.generator import TickSink, _RandomWalk, run_synthetic_feed
 
 from tqtk_common.records import Tick
 
 SYMBOLS = ("EURUSD", "USDJPY", "GBPUSD")
 
-# Zero variance: every generated price stays at `initial_price`, every interval at
-# `interval_mean` - deterministic, so tests below can assert on tick count/routing/shape without
+# Every draw is a fixed point mass: price stays at `initial_price`, spread stays at 0.0002, every
+# interval is 0.01s - deterministic, so tests below can assert on tick count/routing/shape without
 # depending on the random walk itself (that's `_RandomWalk`'s own test section, further down).
 _FIXED_CALIBRATION = SymbolCalibration(
-    initial_price=1.10000,
-    price_increment=0.00001,
-    return_mean=0.0,
-    return_stdev=0.0,
-    interval_mean=0.01,
-    interval_stdev=0.0,
+    initial_price=Decimal("1.10000"),
+    price_increment=Decimal("0.00001"),
+    return_distribution=Distribution("constant", (0.0,)),
+    spread_distribution=Distribution("constant", (0.0002,)),
+    interval_distribution=Distribution("constant", (0.01,)),
 )
 
 
@@ -180,64 +183,84 @@ def test_a_restart_produces_a_new_session_id_with_seq_reset_to_zero():
     assert [tick.seq for tick in second_sink.published] == [0, 1, 2]
 
 
-# --- calibrated price generation (task 5.4): `_RandomWalk` follows `p_t+1 = p_t + N(mu_I, sigma_I)`
-# -------------------------------------------------------------------------------------------------
+# --- calibrated price generation (task 5.4): `_RandomWalk` follows
+# `bid_t+1 = bid_t + D_R(params)`, `ask_t+1 = bid_t+1 + D_S(params)` -------------------------------
 
 
-def test_random_walk_returns_approximate_the_calibrated_normal_distribution():
+def test_random_walk_ask_equals_bid_plus_the_drawn_spread():
+    """Replaces the old `mid +/- spread/2` model: ask is bid plus a (possibly per-tick random)
+    spread, never symmetric around a synthetic midpoint."""
     calibration = SymbolCalibration(
-        initial_price=1.10000,
-        price_increment=0.00001,
-        return_mean=0.00002,
-        return_stdev=0.00010,
-        interval_mean=1.0,
-        interval_stdev=0.1,
+        initial_price=Decimal("1.10000"),
+        price_increment=Decimal("0.00001"),
+        return_distribution=Distribution("constant", (0.0,)),
+        spread_distribution=Distribution("constant", (0.0002,)),
+        interval_distribution=Distribution("constant", (1.0,)),
+    )
+    walk = _RandomWalk(calibration, pacing_multiplier=1.0, seed=1)
+
+    for _ in range(50):
+        bid, ask = walk.next_quote()
+        assert bid == Decimal("1.10000")  # the return is always exactly 0
+        assert ask - bid == Decimal("0.0002")
+
+
+def test_random_walk_bid_returns_approximate_the_calibrated_distribution():
+    loc, scale = 0.00002, 0.00010
+    calibration = SymbolCalibration(
+        initial_price=Decimal("1.10000"),
+        price_increment=Decimal("0.00001"),
+        return_distribution=Distribution("laplace", (loc, scale)),
+        spread_distribution=Distribution("constant", (0.0002,)),
+        interval_distribution=Distribution("constant", (1.0,)),
     )
     walk = _RandomWalk(calibration, pacing_multiplier=1.0, seed=1234)
     n = 5000
 
-    mids = []
+    bids = []
     for _ in range(n):
         bid, ask = walk.next_quote()
-        mids.append((bid + ask) / 2)
-    returns = [later - earlier for earlier, later in pairwise(mids)]
+        assert ask - bid == Decimal("0.0002")
+        bids.append(float(bid))
+    returns = [later - earlier for earlier, later in pairwise(bids)]
 
-    # Standard error of the mean over n samples, times a 3-sigma margin for test stability.
-    mean_tolerance = 3 * calibration.return_stdev / (n**0.5)
-    assert statistics.fmean(returns) == pytest.approx(calibration.return_mean, abs=mean_tolerance)
-    assert statistics.pstdev(returns) == pytest.approx(calibration.return_stdev, rel=0.1)
+    expected_stdev = scale * (2**0.5)  # Var(Laplace) = 2*b^2
+    mean_tolerance = 3 * expected_stdev / (n**0.5)
+    assert statistics.fmean(returns) == pytest.approx(loc, abs=mean_tolerance)
+    assert statistics.pstdev(returns) == pytest.approx(expected_stdev, rel=0.1)
 
 
 def test_random_walk_prices_are_rounded_to_the_price_increment():
     calibration = SymbolCalibration(
-        initial_price=1.10000,
-        price_increment=0.00001,
-        return_mean=0.0,
-        return_stdev=0.0005,
-        interval_mean=1.0,
-        interval_stdev=0.0,
+        initial_price=Decimal("1.10000"),
+        price_increment=Decimal("0.00001"),
+        return_distribution=Distribution("laplace", (0.0, 0.0005)),
+        spread_distribution=Distribution("gamma", (2.0, 0.00001, 0.00005)),
+        interval_distribution=Distribution("constant", (1.0,)),
     )
     walk = _RandomWalk(calibration, pacing_multiplier=1.0, seed=7)
 
     for _ in range(200):
         bid, ask = walk.next_quote()
-        mid = (bid + ask) / 2
-        multiple = mid / calibration.price_increment
-        assert multiple == pytest.approx(round(multiple), abs=1e-6)
+        assert isinstance(bid, Decimal)
+        assert isinstance(ask, Decimal)
+        bid_multiple = bid / calibration.price_increment
+        ask_multiple = ask / calibration.price_increment
+        assert bid_multiple == round(bid_multiple)
+        assert ask_multiple == round(ask_multiple)
 
 
-# --- calibrated tick pacing (task 5.5): interval ~ N(mu_It, sigma_It), scaled by the pacing
-# multiplier -----------------------------------------------------------------------------------
+# --- calibrated tick pacing (task 5.5): interval ~ D_T(params), scaled by the pacing multiplier --
 
 
 def test_random_walk_interval_approximates_the_calibrated_distribution_scaled_by_pacing():
+    mean, stdev = 0.2, 0.05
     calibration = SymbolCalibration(
-        initial_price=1.0,
-        price_increment=0.00001,
-        return_mean=0.0,
-        return_stdev=0.0,
-        interval_mean=0.2,
-        interval_stdev=0.05,
+        initial_price=Decimal("1.0"),
+        price_increment=Decimal("0.00001"),
+        return_distribution=Distribution("constant", (0.0,)),
+        spread_distribution=Distribution("constant", (0.0,)),
+        interval_distribution=Distribution("normal", (mean, stdev)),
     )
     pacing_multiplier = 2.0
     walk = _RandomWalk(calibration, pacing_multiplier=pacing_multiplier, seed=99)
@@ -245,8 +268,8 @@ def test_random_walk_interval_approximates_the_calibrated_distribution_scaled_by
 
     intervals = [walk.next_interval() for _ in range(n)]
 
-    expected_mean = calibration.interval_mean / pacing_multiplier
-    expected_stdev = calibration.interval_stdev / pacing_multiplier
+    expected_mean = mean / pacing_multiplier
+    expected_stdev = stdev / pacing_multiplier
     assert statistics.fmean(intervals) == pytest.approx(
         expected_mean, abs=3 * expected_stdev / (n**0.5)
     )
@@ -254,30 +277,29 @@ def test_random_walk_interval_approximates_the_calibrated_distribution_scaled_by
 
 
 def test_random_walk_interval_defaults_to_the_samples_own_cadence_at_multiplier_one():
+    mean, stdev = 0.5, 0.1
     calibration = SymbolCalibration(
-        initial_price=1.0,
-        price_increment=0.00001,
-        return_mean=0.0,
-        return_stdev=0.0,
-        interval_mean=0.5,
-        interval_stdev=0.1,
+        initial_price=Decimal("1.0"),
+        price_increment=Decimal("0.00001"),
+        return_distribution=Distribution("constant", (0.0,)),
+        spread_distribution=Distribution("constant", (0.0,)),
+        interval_distribution=Distribution("normal", (mean, stdev)),
     )
     walk = _RandomWalk(calibration, pacing_multiplier=1.0, seed=11)
 
     intervals = [walk.next_interval() for _ in range(5000)]
 
-    assert statistics.fmean(intervals) == pytest.approx(calibration.interval_mean, rel=0.05)
+    assert statistics.fmean(intervals) == pytest.approx(mean, rel=0.05)
 
 
 def test_random_walk_interval_is_never_negative():
-    # Deliberately huge stdev relative to mean, to force some raw gaussian samples negative.
+    # Deliberately huge stdev relative to mean, to force some raw draws negative.
     calibration = SymbolCalibration(
-        initial_price=1.0,
-        price_increment=0.00001,
-        return_mean=0.0,
-        return_stdev=0.0,
-        interval_mean=0.001,
-        interval_stdev=1.0,
+        initial_price=Decimal("1.0"),
+        price_increment=Decimal("0.00001"),
+        return_distribution=Distribution("constant", (0.0,)),
+        spread_distribution=Distribution("constant", (0.0,)),
+        interval_distribution=Distribution("normal", (0.001, 1.0)),
     )
     walk = _RandomWalk(calibration, pacing_multiplier=1.0, seed=3)
 

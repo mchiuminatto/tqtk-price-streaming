@@ -1,16 +1,26 @@
-"""Verification for task 5.3: per-symbol parameter derivation from sample data."""
+"""Verification for task 5.3: per-symbol calibration assembly.
+
+`initial_price`/`price_increment` are derived from a symbol's real sample data (unchanged
+behavior); `return`/`spread`/`interval` distributions are looked up from `distributions.py`'s
+fixed per-symbol tables rather than fitted from the sample - see `calibration.py`'s and
+`distributions.py`'s module docstrings for why.
+"""
 
 from __future__ import annotations
 
 import datetime as dt
-import statistics
-from itertools import pairwise
+from decimal import Decimal
 from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from feed_adapter_synthetic.calibration import compute_calibration
+from feed_adapter_synthetic.distributions import (
+    INTERVAL_DISTRIBUTIONS,
+    RETURN_DISTRIBUTIONS,
+    SPREAD_DISTRIBUTIONS,
+)
 
 _BIDS = [1.10000, 1.10001, 1.10003, 1.10002, 1.10002]
 _ASKS = [1.10020, 1.10021, 1.10023, 1.10022, 1.10022]
@@ -34,25 +44,20 @@ def _write_sample(tmp_path: Path, symbol: str = "EURUSD") -> None:
     pq.write_table(table, tmp_path / f"{symbol}_Ticks_2026.01.01_2026.01.02.parquet")
 
 
-# --- derivation matches a fixture sample's known statistics -------------------------------------
+# --- initial_price / price_increment still come from the sample data ----------------------------
 
 
-def test_derives_parameters_matching_a_fixture_samples_known_statistics(tmp_path: Path):
+def test_derives_initial_price_and_increment_from_the_fixture_sample(tmp_path: Path):
     _write_sample(tmp_path)
 
     calibration = compute_calibration("EURUSD", tmp_path)
 
-    expected_returns = [later - earlier for earlier, later in pairwise(_BIDS)]
-    expected_intervals = [(later - earlier) / 1000 for earlier, later in pairwise(_TIMES_MS)]
-
-    assert calibration.initial_price == pytest.approx(_BIDS[0])
+    assert isinstance(calibration.initial_price, Decimal)
+    assert isinstance(calibration.price_increment, Decimal)
+    assert float(calibration.initial_price) == pytest.approx(_BIDS[0])
     # Max decimal count among the Bids: 1.10000 -> 1 (trailing zeros drop out of repr), the rest
     # -> 5, so the minimum change position lands on the 5th decimal.
-    assert calibration.price_increment == pytest.approx(1e-05)
-    assert calibration.return_mean == pytest.approx(statistics.fmean(expected_returns))
-    assert calibration.return_stdev == pytest.approx(statistics.pstdev(expected_returns))
-    assert calibration.interval_mean == pytest.approx(statistics.fmean(expected_intervals))
-    assert calibration.interval_stdev == pytest.approx(statistics.pstdev(expected_intervals))
+    assert calibration.price_increment == Decimal("1e-5")
 
 
 def test_derives_from_bid_not_the_bid_ask_mid(tmp_path: Path):
@@ -62,11 +67,37 @@ def test_derives_from_bid_not_the_bid_ask_mid(tmp_path: Path):
 
     calibration = compute_calibration("EURUSD", tmp_path)
 
-    assert calibration.initial_price == pytest.approx(_BIDS[0])
-    assert calibration.initial_price != pytest.approx((_BIDS[0] + _ASKS[0]) / 2)
+    assert float(calibration.initial_price) == pytest.approx(_BIDS[0])
+    assert float(calibration.initial_price) != pytest.approx((_BIDS[0] + _ASKS[0]) / 2)
 
 
-# --- minimum change position: the last decimal place present, per docs/sythetic-price.md --------
+# --- return/spread/interval distributions come from distributions.py, not the sample ------------
+
+
+def test_distributions_are_looked_up_from_distributions_py_not_fitted_from_the_sample(
+    tmp_path: Path,
+):
+    """The fixture's own Bid values would fit very different parameters than the real EURUSD
+    sample - if `compute_calibration` were still fitting from data, this would fail."""
+    _write_sample(tmp_path)
+
+    calibration = compute_calibration("EURUSD", tmp_path)
+
+    assert calibration.return_distribution == RETURN_DISTRIBUTIONS["EURUSD"]
+    assert calibration.spread_distribution == SPREAD_DISTRIBUTIONS["EURUSD"]
+    assert calibration.interval_distribution == INTERVAL_DISTRIBUTIONS["EURUSD"]
+
+
+def test_raises_on_a_symbol_with_sample_data_but_no_fitted_distribution(tmp_path: Path):
+    """A sample file alone is no longer enough to calibrate a symbol - it also needs an entry in
+    distributions.py's tables (see that module's docstring on this deliberate trade-off)."""
+    _write_sample(tmp_path, symbol="NOTREGISTERED")
+
+    with pytest.raises(ValueError, match="no fitted return/spread/interval distribution"):
+        compute_calibration("NOTREGISTERED", tmp_path)
+
+
+# --- minimum change position: the last decimal place present, per docs/minimum-change-position.md
 
 
 def test_derives_the_minimum_change_position_from_the_last_decimal_place(tmp_path: Path):
@@ -89,7 +120,7 @@ def test_derives_the_minimum_change_position_from_the_last_decimal_place(tmp_pat
 
         calibration = compute_calibration(symbol, tmp_path)
 
-        assert calibration.price_increment == pytest.approx(expected_increment)
+        assert calibration.price_increment == Decimal(str(expected_increment))
 
 
 def test_minimum_change_position_takes_the_max_decimal_count_over_the_whole_sample(
@@ -112,12 +143,12 @@ def test_minimum_change_position_takes_the_max_decimal_count_over_the_whole_samp
 
     calibration = compute_calibration("EURUSD", tmp_path)
 
-    assert calibration.price_increment == pytest.approx(1e-05)
+    assert calibration.price_increment == Decimal("1e-5")
 
 
-def test_a_flat_sample_computes_a_valid_calibration_with_zero_return_variance(tmp_path: Path):
+def test_a_flat_sample_computes_a_valid_calibration(tmp_path: Path):
     """The minimum change position no longer depends on any nonzero return (see calibration.py) -
-    a flat sample computes cleanly rather than raising."""
+    a flat sample computes cleanly rather than raising, for a symbol distributions.py knows."""
     table = pa.table(
         {
             "time_art": pa.array(
@@ -128,30 +159,29 @@ def test_a_flat_sample_computes_a_valid_calibration_with_zero_return_variance(tm
             "Bid": pa.array([1.10023, 1.10023], type=pa.float64()),
         }
     )
-    pq.write_table(table, tmp_path / "FLAT_Ticks_2026.01.01_2026.01.02.parquet")
+    pq.write_table(table, tmp_path / "EURUSD_Ticks_2026.01.01_2026.01.02.parquet")
 
-    calibration = compute_calibration("FLAT", tmp_path)
+    calibration = compute_calibration("EURUSD", tmp_path)
 
-    assert calibration.return_mean == 0.0
-    assert calibration.return_stdev == 0.0
-    assert calibration.price_increment == pytest.approx(1e-05)
-
-
-# --- error handling on a degenerate sample ------------------------------------------------------
+    assert calibration.price_increment == Decimal("1e-5")
+    assert calibration.return_distribution == RETURN_DISTRIBUTIONS["EURUSD"]
 
 
-def test_raises_on_a_sample_with_fewer_than_two_ticks(tmp_path: Path):
+# --- error handling on a degenerate sample -------------------------------------------------------
+
+
+def test_raises_on_an_empty_sample(tmp_path: Path):
     table = pa.table(
         {
-            "time_art": pa.array([_EPOCH], type=pa.timestamp("ms")),
-            "Ask": pa.array([1.1002], type=pa.float64()),
-            "Bid": pa.array([1.1000], type=pa.float64()),
+            "time_art": pa.array([], type=pa.timestamp("ms")),
+            "Ask": pa.array([], type=pa.float64()),
+            "Bid": pa.array([], type=pa.float64()),
         }
     )
-    pq.write_table(table, tmp_path / "ONE_Ticks_2026.01.01_2026.01.02.parquet")
+    pq.write_table(table, tmp_path / "EURUSD_Ticks_2026.01.01_2026.01.02.parquet")
 
-    with pytest.raises(ValueError, match="fewer than 2 ticks"):
-        compute_calibration("ONE", tmp_path)
+    with pytest.raises(ValueError, match="no ticks"):
+        compute_calibration("EURUSD", tmp_path)
 
 
 # --- smoke test against the repo's real sample data ---------------------------------------------
@@ -160,6 +190,7 @@ def test_raises_on_a_sample_with_fewer_than_two_ticks(tmp_path: Path):
 def test_computes_calibration_from_the_repos_real_eurusd_sample():
     calibration = compute_calibration("EURUSD")
 
-    assert calibration.price_increment == pytest.approx(1e-05)
-    assert calibration.interval_mean > 0
-    assert calibration.return_stdev > 0
+    assert calibration.price_increment == Decimal("1e-5")
+    assert calibration.return_distribution == RETURN_DISTRIBUTIONS["EURUSD"]
+    assert calibration.spread_distribution == SPREAD_DISTRIBUTIONS["EURUSD"]
+    assert calibration.interval_distribution == INTERVAL_DISTRIBUTIONS["EURUSD"]

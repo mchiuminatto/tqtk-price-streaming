@@ -1,8 +1,10 @@
 # Tick Return Distributions — Per-Symbol Best Fit
 
-`docs/synthetic-price.md` models every instrument's returns as `N(μ_I, σ_I)` — one fixed family
-(Normal) for all 17 symbols. This note checks that assumption empirically against the real sample
-data (`data/*.parquet`) rather than assuming it.
+`docs/synthetic-price.md` originally modeled every instrument's returns as `N(μ_I, σ_I)` — one
+fixed family (Normal) for all 17 symbols. This note checked that assumption empirically against
+the real sample data (`data/*.parquet`) rather than assuming it, and the result below is why
+`docs/synthetic-price.md` now specifies a per-symbol fitted return distribution instead (see
+Status).
 
 ## Method
 
@@ -64,7 +66,8 @@ issues"* — leptokurtosis is close to universal in financial returns.
 
 ## Status
 
-Analysis only — `calibration.py`, `generator.py`, and `docs/synthetic-price.md` are unchanged.
-Adopting per-symbol distributions instead of one fixed Normal would mean: a distribution-family
-field (plus that family's own params) on `SymbolCalibration`, a sampler in `_RandomWalk` that
-isn't `random.gauss`, and updates to the fidelity-acceptance spec/tests — not done here.
+**Adopted.** `services/feed-adapter-synthetic/src/feed_adapter_synthetic/distributions.py` is the
+executable form of the table above: `RETURN_DISTRIBUTIONS` carries each symbol's exact family and
+parameters, and `SymbolCalibration.return_distribution`/`_RandomWalk.next_quote` sample from it
+(via hand-rolled `random.Random`-based transforms - no `scipy`/`numpy` at runtime). `docs/synthetic-price.md`
+was updated to specify this per-symbol model in place of the old fixed `N(μ_I, σ_I)`.

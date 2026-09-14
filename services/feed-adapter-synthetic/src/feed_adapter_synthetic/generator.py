@@ -5,10 +5,24 @@ pace. Generation is decoupled from transport through `TickSink`: `RedisTickSink`
 is the production implementation, and a test supplies an in-memory fake instead of requiring a
 live Redis to verify which symbols were published.
 
-Per `docs/sythetic-price.md`, `_RandomWalk` follows a biased random walk calibrated per instrument
-from its `data/*.parquet` sample (`calibration.py`): the next price is `p_t+1 = p_t + r_t+1`,
-`r_t+1 ~ N(mu_I, sigma_I)`, rounded to the instrument's minimum price-change unit; the wait before
-the next tick is drawn from `N(mu_It, sigma_It)`, scaled by the configured pacing multiplier.
+Per `docs/synthetic-price.md`, `_RandomWalk` follows a biased random walk calibrated per
+instrument: the next bid is `bid_t+1 = bid_t + r_t+1`, `r_t+1` drawn from that symbol's fitted
+return distribution (`docs/tick-distributions.md`) and rounded to the instrument's minimum
+price-change unit; the ask is `bid_t+1 + spread_t+1`, `spread_t+1` drawn from that symbol's fitted
+spread distribution (`docs/spread-distributions.md`) - not the fixed constant this used before
+per-symbol spread fitting existed. The wait before the next tick is drawn from that symbol's
+fitted tick-interval distribution (`docs/tick-interval-distributions.md`), scaled by the
+configured pacing multiplier. `calibration.py` assembles the `SymbolCalibration` these
+distributions live on; `distributions.py` implements sampling from each fitted family.
+
+Per that doc's Constraints section, every price value and every value derived directly from a
+price - the running bid, the sampled return and spread once drawn, the rounded/published bid and
+ask - is a `Decimal`, never a `float`, to keep the walk from accumulating sub-pip floating-point
+noise over a long-running process. A distribution's own parameters stay `float`: `Distribution.sample`
+is built on `random.Random`, which is float-only, so a sampled return/spread is converted to
+`Decimal` immediately after being drawn. The `Tick` wire contract's `Price` type is `float` (a
+system-wide contract, not specific to this feed), so the final bid/ask are cast to `float` only at
+that publication boundary.
 """
 
 from __future__ import annotations
@@ -17,6 +31,7 @@ import asyncio
 import random
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from decimal import ROUND_HALF_EVEN, Decimal
 from pathlib import Path
 from typing import Protocol
 
@@ -28,8 +43,6 @@ from .calibration import SymbolCalibration, compute_calibration
 __all__ = ["TickSink", "run_synthetic_feed"]
 
 PROVIDER = "synthetic"
-
-_DEFAULT_SPREAD: float = 0.0002
 
 
 class TickSink(Protocol):
@@ -46,7 +59,7 @@ def _default_clock() -> int:
 class _RandomWalk:
     """One symbol's calibrated bid/ask random walk and tick pacing - see module docstring."""
 
-    __slots__ = ("_calibration", "_mid", "_pacing_multiplier", "_rng", "_spread")
+    __slots__ = ("_bid", "_calibration", "_pacing_multiplier", "_rng")
 
     def __init__(
         self,
@@ -57,23 +70,33 @@ class _RandomWalk:
     ) -> None:
         self._calibration = calibration
         self._rng = random.Random(seed)
-        self._mid = calibration.initial_price
-        self._spread = _DEFAULT_SPREAD
+        self._bid = calibration.initial_price
         self._pacing_multiplier = pacing_multiplier
 
-    def next_quote(self) -> tuple[float, float]:
+    def next_quote(self) -> tuple[Decimal, Decimal]:
         calibration = self._calibration
-        self._mid += self._rng.gauss(calibration.return_mean, calibration.return_stdev)
         increment = calibration.price_increment
-        self._mid = round(round(self._mid / increment) * increment, 10)
-        # Keeps `bid = mid - spread/2` positive, which `Tick`'s `Price` type requires.
-        self._mid = max(self._mid, self._spread)
-        half = self._spread / 2
-        return self._mid - half, self._mid + half
+        # `Distribution.sample` is float-only; the draw is converted to `Decimal` immediately,
+        # before it touches the `Decimal` price state (see module docstring).
+        drawn_return = calibration.return_distribution.sample(self._rng)
+        self._bid += Decimal(str(drawn_return))
+        # Quantizing to the increment's own exponent is an exact rounding to the nearest multiple
+        # of it, since `price_increment` is always a power of ten.
+        self._bid = self._bid.quantize(increment, rounding=ROUND_HALF_EVEN)
+        # Keeps bid strictly positive, which `Tick`'s `Price` type requires: the smallest
+        # representable positive price at this instrument's own grain.
+        self._bid = max(self._bid, increment)
+
+        drawn_spread = calibration.spread_distribution.sample(self._rng)
+        spread = Decimal(str(drawn_spread)).quantize(increment, rounding=ROUND_HALF_EVEN)
+        # A quantized draw can floor to exactly zero at this instrument's grain - a zero spread is
+        # a valid quote (ask == bid), a negative one never is.
+        spread = max(spread, Decimal(0))
+        return self._bid, self._bid + spread
 
     def next_interval(self) -> float:
         calibration = self._calibration
-        delta = self._rng.gauss(calibration.interval_mean, calibration.interval_stdev)
+        delta = calibration.interval_distribution.sample(self._rng)
         return max(delta, 0.0) / self._pacing_multiplier
 
 
@@ -122,8 +145,10 @@ async def _run_symbol(
             symbol=symbol,
             provider_ts=recv_ts,  # the synthetic generator is its own "provider"
             recv_ts=recv_ts,
-            bid=bid,
-            ask=ask,
+            # `Tick.bid`/`ask` are `Price` (`float`) - the system-wide wire contract, unrelated to
+            # this feed's internal `Decimal` price arithmetic (see module docstring).
+            bid=float(bid),
+            ask=float(ask),
             session_id=session.session_id,
             seq=session.next_seq(PROVIDER, symbol),
         )

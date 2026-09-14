@@ -1,9 +1,11 @@
 # Tick Spread Distributions — Per-Symbol Best Fit
 
 Companion to [`tick-distributions.md`](./tick-distributions.md), same question but for spread
-(`Ask - Bid`) instead of returns. Neither `docs/synthetic-price.md` nor `calibration.py` currently
-model spread at all — `generator.py` uses a single hardcoded `_DEFAULT_SPREAD` constant for every
-symbol. This note checks empirically what spread actually looks like per instrument.
+(`Ask - Bid`) instead of returns. At the time this analysis was run, neither
+`docs/synthetic-price.md` nor `calibration.py` modeled spread at all — `generator.py` used a
+single hardcoded `_DEFAULT_SPREAD` constant for every symbol. This note checked empirically what
+spread actually looks like per instrument, and the result below is why both now use a per-symbol
+fitted spread distribution instead (see Status).
 
 ## Method
 
@@ -75,8 +77,8 @@ comparable across symbols without normalizing by each instrument's own price lev
 
 ## Status
 
-Analysis only — no production code changed. `_DEFAULT_SPREAD` in `generator.py` remains a single
-hardcoded constant. Adopting a per-symbol fitted spread distribution would mean adding it to
-`SymbolCalibration`, sampling from it per tick in `_RandomWalk.next_quote` instead of using
-`_DEFAULT_SPREAD`, and updating `docs/synthetic-price.md` (which currently doesn't specify a
-spread model at all) — not done here.
+**Adopted.** `distributions.py`'s `SPREAD_DISTRIBUTIONS` carries each symbol's exact family and
+parameters from the table above. `_DEFAULT_SPREAD` is gone: `_RandomWalk.next_quote` now draws a
+fresh spread per tick from `SymbolCalibration.spread_distribution`, and `ask = bid + spread`
+(replacing the old `mid ± spread/2`). `docs/synthetic-price.md` now specifies this spread model
+explicitly.

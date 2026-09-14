@@ -8,6 +8,8 @@ import pytest
 from feed_adapter_synthetic.symbols import discover_symbols, find_data_dir, find_symbol_file
 
 EXPECTED_SYMBOLS = (
+    "AAPLUSUSD",
+    "ARKQUSUSD",
     "AUDJPY",
     "AUDUSD",
     "EURGBP",
@@ -17,6 +19,8 @@ EXPECTED_SYMBOLS = (
     "GBPUSD",
     "NZDJPY",
     "NZDUSD",
+    "USA500IDXUSD",
+    "USATECHIDXUSD",
     "USDCAD",
     "USDCHF",
     "USDCNH",

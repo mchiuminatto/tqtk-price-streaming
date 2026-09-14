@@ -67,7 +67,7 @@
 
 ## 5. feed-adapter-synthetic (`synthetic-feed` spec)
 
-- [x] 5.1 Implement tick generation for the 13-symbol set (sourced from `data/*.parquet` file
+- [x] 5.1 Implement tick generation for the 17-symbol set (sourced from `data/*.parquet` file
       names); verify a test run publishes ticks only for the configured symbols and no others.
 - [x] 5.2 Implement `provider="synthetic"` tagging, `recv_ts` stamping (monotonic per
       `(provider,symbol)`), and `seq`/`session_id` assignment per the data contract; verify
@@ -92,6 +92,17 @@
       rate with no code change.
 - [x] 5.7 Verify the service exposes `/health`, `/ready`, `/metrics` per the service-runtime
       contract.
+- [x] 5.8 Revise 5.3-5.5: replace the online `N(μ_I, σ_I)`/`N(μ_It, σ_It)` derivation with
+      per-symbol return/interval distributions (family + parameters) fit offline by AIC over
+      several candidate families and looked up from `distributions.py`
+      (`docs/tick-distributions.md`, `docs/tick-interval-distributions.md`); every one of the 17
+      symbols rejected Normal for both quantities. Add a per-symbol fitted spread distribution
+      (`docs/spread-distributions.md`), replacing the fixed `_DEFAULT_SPREAD` constant, so
+      `ask = bid + spread` is sampled fresh per tick instead of `mid ± spread/2` around a
+      synthetic midpoint; verify unit tests confirm each hand-rolled sampler (`random.Random`
+      only, no `scipy`/`numpy` at runtime) matches its family's known mean/variance/median, and
+      that `compute_calibration` raises a clear error for a symbol with sample data but no
+      registered distribution.
 
 ## 6. aggregation-svc (`bar-aggregation` spec)
 

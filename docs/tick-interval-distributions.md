@@ -80,8 +80,9 @@ analysis intentionally did **not** exclude the gaps either, to stay consistent w
 
 ## Status
 
-**Adopted, gaps included.** `distributions.py`'s `INTERVAL_DISTRIBUTIONS` carries each symbol's
-exact family and parameters from the table above - fit with the overnight/weekend gaps left in,
+**Adopted, gaps included.** `distributions.py`'s private `_INTERVAL_DISTRIBUTIONS` table carries each
+symbol's exact family and parameters from the table above, reached through
+`distributions.interval_distribution(symbol)` - fit with the overnight/weekend gaps left in,
 consistent with what this doc characterizes (see the Caveat above), not with the
 fidelity-acceptance spec's gap-excluded metrics. `SymbolCalibration.interval_distribution`/
 `_RandomWalk.next_interval` sample from it; `docs/synthetic-price.md` now specifies this per-symbol

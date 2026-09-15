@@ -24,12 +24,8 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
-from .distributions import (
-    INTERVAL_DISTRIBUTIONS,
-    RETURN_DISTRIBUTIONS,
-    SPREAD_DISTRIBUTIONS,
-    Distribution,
-)
+from . import distributions
+from .distributions import Distribution
 from .symbols import find_symbol_file
 
 __all__ = ["SymbolCalibration", "compute_calibration"]
@@ -86,8 +82,9 @@ def compute_calibration(symbol: str, data_dir: Path | None = None) -> SymbolCali
     (its `Bid` column, not the `Bid`/`Ask` mid: averaging the two introduces sub-pip
     floating-point noise, since `Bid` and `Ask` tick independently at the instrument's real pip
     grain). The return/spread/interval distributions are not re-derived from that sample on every
-    call - they're looked up from `distributions.py`'s fixed per-symbol tables (see that module's
-    docstring for why).
+    call - they come from `distributions.return_distribution`/`spread_distribution`/
+    `interval_distribution`, which read the fixed per-symbol tables that module owns (see its
+    docstring for why) and raise naming the missing row when a symbol has no fit yet.
     """
     path = find_symbol_file(symbol, data_dir)
     table = pq.read_table(path, columns=["Bid"])
@@ -95,21 +92,10 @@ def compute_calibration(symbol: str, data_dir: Path | None = None) -> SymbolCali
     if len(prices) < 1:
         raise ValueError(f"{path.name!r} has no ticks; cannot calibrate")
 
-    try:
-        return_distribution = RETURN_DISTRIBUTIONS[symbol]
-        spread_distribution = SPREAD_DISTRIBUTIONS[symbol]
-        interval_distribution = INTERVAL_DISTRIBUTIONS[symbol]
-    except KeyError as exc:
-        raise ValueError(
-            f"no fitted return/spread/interval distribution for symbol {symbol!r} in "
-            "distributions.py - add it per docs/tick-distributions.md, "
-            "docs/spread-distributions.md, and docs/tick-interval-distributions.md"
-        ) from exc
-
     return SymbolCalibration(
         initial_price=Decimal(str(prices[0].as_py())),
         price_increment=Decimal(1).scaleb(-_decimal_places(prices, symbol=symbol, source=path)),
-        return_distribution=return_distribution,
-        spread_distribution=spread_distribution,
-        interval_distribution=interval_distribution,
+        return_distribution=distributions.return_distribution(symbol),
+        spread_distribution=distributions.spread_distribution(symbol),
+        interval_distribution=distributions.interval_distribution(symbol),
     )

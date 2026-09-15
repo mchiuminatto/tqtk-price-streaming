@@ -77,8 +77,9 @@ comparable across symbols without normalizing by each instrument's own price lev
 
 ## Status
 
-**Adopted.** `distributions.py`'s `SPREAD_DISTRIBUTIONS` carries each symbol's exact family and
-parameters from the table above. `_DEFAULT_SPREAD` is gone: `_RandomWalk.next_quote` now draws a
+**Adopted.** `distributions.py`'s private `_SPREAD_DISTRIBUTIONS` table carries each symbol's exact
+family and parameters from the table above, reached through
+`distributions.spread_distribution(symbol)`. `_DEFAULT_SPREAD` is gone: `_RandomWalk.next_quote` now draws a
 fresh spread per tick from `SymbolCalibration.spread_distribution`, and `ask = bid + spread`
 (replacing the old `mid ± spread/2`). `docs/synthetic-price.md` now specifies this spread model
 explicitly.

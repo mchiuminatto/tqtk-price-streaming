@@ -12,12 +12,8 @@ import random
 import statistics
 
 import pytest
-from feed_adapter_synthetic.distributions import (
-    INTERVAL_DISTRIBUTIONS,
-    RETURN_DISTRIBUTIONS,
-    SPREAD_DISTRIBUTIONS,
-    Distribution,
-)
+from feed_adapter_synthetic import distributions
+from feed_adapter_synthetic.distributions import Distribution
 from feed_adapter_synthetic.symbols import discover_symbols
 
 _N = 200_000
@@ -122,12 +118,23 @@ def test_unknown_family_raises():
 
 
 def test_every_discovered_symbol_has_all_three_distributions_registered():
-    symbols = discover_symbols()
+    # `registered_symbols` intersects the three tables, so a symbol fitted for only some of the
+    # quantities shows up as missing here rather than passing on a partial entry.
+    missing = sorted(set(discover_symbols()) - distributions.registered_symbols())
 
-    missing_return = [s for s in symbols if s not in RETURN_DISTRIBUTIONS]
-    missing_spread = [s for s in symbols if s not in SPREAD_DISTRIBUTIONS]
-    missing_interval = [s for s in symbols if s not in INTERVAL_DISTRIBUTIONS]
+    assert not missing, f"missing at least one fitted distribution for: {missing}"
 
-    assert not missing_return, f"missing return distribution for: {missing_return}"
-    assert not missing_spread, f"missing spread distribution for: {missing_spread}"
-    assert not missing_interval, f"missing interval distribution for: {missing_interval}"
+
+@pytest.mark.parametrize(
+    ("accessor", "expected_message"),
+    [
+        (distributions.return_distribution, "no fitted return distribution"),
+        (distributions.spread_distribution, "no fitted spread distribution"),
+        (distributions.interval_distribution, "no fitted tick interval distribution"),
+    ],
+)
+def test_unregistered_symbol_raises_naming_its_quantity(accessor, expected_message):
+    # The accessors own this error so every caller gets the same actionable message - which
+    # quantity is unfitted, and which doc the missing row comes from.
+    with pytest.raises(ValueError, match=expected_message):
+        accessor("NOTASYMBOL")

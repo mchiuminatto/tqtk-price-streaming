@@ -67,7 +67,7 @@ issues"* — leptokurtosis is close to universal in financial returns.
 ## Status
 
 **Adopted.** `services/feed-adapter-synthetic/src/feed_adapter_synthetic/distributions.py` is the
-executable form of the table above: `RETURN_DISTRIBUTIONS` carries each symbol's exact family and
-parameters, and `SymbolCalibration.return_distribution`/`_RandomWalk.next_quote` sample from it
+executable form of the table above: its private `_RETURN_DISTRIBUTIONS` table carries each symbol's
+exact family and parameters, reached through `distributions.return_distribution(symbol)`, and `SymbolCalibration.return_distribution`/`_RandomWalk.next_quote` sample from it
 (via hand-rolled `random.Random`-based transforms - no `scipy`/`numpy` at runtime). `docs/synthetic-price.md`
 was updated to specify this per-symbol model in place of the old fixed `N(μ_I, σ_I)`.

@@ -18,6 +18,12 @@ here too, not just a sample file dropped under `data/` (unlike `symbols.discover
 that drift becomes a real problem, the fix is running the offline fit script again and updating
 the three docs and this module together, not inventing a runtime fallback.
 
+The three tables themselves are private; callers reach a symbol's fitted distributions through
+`return_distribution`/`spread_distribution`/`interval_distribution`, which raise a `ValueError`
+naming the missing quantity and its source doc rather than a bare `KeyError`. That keeps the
+"which symbols are registered" question (`registered_symbols`) and the "add a row here" error in
+the module that owns the data, instead of restated at every call site.
+
 `sample()` implements every family with `random.Random` alone, via standard transforms, so the
 feed itself never needs `scipy`/`numpy` at runtime - only the offline fitting step (outside this
 package) does.
@@ -27,14 +33,15 @@ from __future__ import annotations
 
 import math
 import random
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 __all__ = [
-    "INTERVAL_DISTRIBUTIONS",
-    "RETURN_DISTRIBUTIONS",
-    "SPREAD_DISTRIBUTIONS",
     "Distribution",
+    "interval_distribution",
+    "registered_symbols",
+    "return_distribution",
+    "spread_distribution",
 ]
 
 
@@ -126,7 +133,7 @@ _SAMPLERS: dict[str, Callable[[random.Random, tuple[float, ...]], float]] = {
 
 # Returns: docs/tick-distributions.md. All 17 symbols reject Normal in favor of Laplace or
 # Student-t (params: laplace=(loc, scale), student_t=(df, loc, scale)).
-RETURN_DISTRIBUTIONS: dict[str, Distribution] = {
+_RETURN_DISTRIBUTIONS: dict[str, Distribution] = {
     "AAPLUSUSD": Distribution("laplace", (0.0, 0.0171211)),
     "ARKQUSUSD": Distribution("laplace", (0.0, 0.00535162)),
     "AUDJPY": Distribution("laplace", (0.0, 0.00124485)),
@@ -148,7 +155,7 @@ RETURN_DISTRIBUTIONS: dict[str, Distribution] = {
 
 # Spread (Ask - Bid): docs/spread-distributions.md. Strictly positive, so fit against a positive-
 # support family with `loc` pinned per symbol (params: shape/a, loc, scale in every case).
-SPREAD_DISTRIBUTIONS: dict[str, Distribution] = {
+_SPREAD_DISTRIBUTIONS: dict[str, Distribution] = {
     "AAPLUSUSD": Distribution("weibull_min", (1.26909, 0.0159993, 0.0480636)),
     "ARKQUSUSD": Distribution("loglogistic", (3.5914, 0.0159993, 0.0770927)),
     "AUDJPY": Distribution("gamma", (0.28141, 0.00399969, 0.00877235)),
@@ -171,7 +178,7 @@ SPREAD_DISTRIBUTIONS: dict[str, Distribution] = {
 # Tick interval (seconds between consecutive ticks): docs/tick-interval-distributions.md.
 # Exponential (a memoryless Poisson-process baseline) never wins for any symbol - tick arrivals
 # are consistently more bursty/clustered than that (params: sigma/shape, loc, scale).
-INTERVAL_DISTRIBUTIONS: dict[str, Distribution] = {
+_INTERVAL_DISTRIBUTIONS: dict[str, Distribution] = {
     "AAPLUSUSD": Distribution("lognormal", (1.0246, -0.0130015, 0.238192)),
     "ARKQUSUSD": Distribution("lognormal", (1.35399, -0.0130048, 0.512815)),
     "AUDJPY": Distribution("loglogistic", (0.902244, 0.0496834, 0.139578)),
@@ -190,3 +197,50 @@ INTERVAL_DISTRIBUTIONS: dict[str, Distribution] = {
     "USDCNH": Distribution("lognormal", (1.35722, -0.000203472, 0.383959)),
     "USDJPY": Distribution("loglogistic", (0.962625, 0.0498518, 0.124719)),
 }
+
+
+def _lookup(
+    table: Mapping[str, Distribution], symbol: str, quantity: str, doc: str
+) -> Distribution:
+    """Fetch `symbol`'s entry from one table, or say which row is missing and where to add it.
+
+    A bare `KeyError` here would only name the symbol; the actionable part is which of the three
+    quantities lacks a fit and which doc the replacement row comes from - so this raises
+    `ValueError` with both, per this package's "raise rather than guess" convention (see
+    `symbols.find_data_dir`/`find_symbol_file`).
+    """
+    try:
+        return table[symbol]
+    except KeyError:
+        raise ValueError(
+            f"no fitted {quantity} distribution for symbol {symbol!r} - add it per {doc}"
+        ) from None
+
+
+def return_distribution(symbol: str) -> Distribution:
+    """`symbol`'s fitted log-return distribution - see `docs/tick-distributions.md`."""
+    return _lookup(_RETURN_DISTRIBUTIONS, symbol, "return", "docs/tick-distributions.md")
+
+
+def spread_distribution(symbol: str) -> Distribution:
+    """`symbol`'s fitted Ask-Bid spread distribution - see `docs/spread-distributions.md`."""
+    return _lookup(_SPREAD_DISTRIBUTIONS, symbol, "spread", "docs/spread-distributions.md")
+
+
+def interval_distribution(symbol: str) -> Distribution:
+    """`symbol`'s fitted tick-interval distribution - see `docs/tick-interval-distributions.md`."""
+    return _lookup(
+        _INTERVAL_DISTRIBUTIONS, symbol, "tick interval", "docs/tick-interval-distributions.md"
+    )
+
+
+def registered_symbols() -> frozenset[str]:
+    """Symbols carrying all three fitted distributions.
+
+    Intersection, not union: a symbol fitted for only one or two quantities cannot be generated,
+    so reporting it as registered would hide exactly the half-added-symbol case this is meant to
+    surface.
+    """
+    return frozenset(
+        _RETURN_DISTRIBUTIONS.keys() & _SPREAD_DISTRIBUTIONS.keys() & _INTERVAL_DISTRIBUTIONS.keys()
+    )

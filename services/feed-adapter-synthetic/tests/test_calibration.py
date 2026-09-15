@@ -1,9 +1,9 @@
 """Verification for task 5.3: per-symbol calibration assembly.
 
 `initial_price`/`price_increment` are derived from a symbol's real sample data (unchanged
-behavior); `return`/`spread`/`interval` distributions are looked up from `distributions.py`'s
-fixed per-symbol tables rather than fitted from the sample - see `calibration.py`'s and
-`distributions.py`'s module docstrings for why.
+behavior); `return`/`spread`/`interval` distributions come from `distributions.py`'s accessors
+over its fixed per-symbol tables rather than being fitted from the sample - see `calibration.py`'s
+and `distributions.py`'s module docstrings for why.
 """
 
 from __future__ import annotations
@@ -15,12 +15,8 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from feed_adapter_synthetic import distributions
 from feed_adapter_synthetic.calibration import compute_calibration
-from feed_adapter_synthetic.distributions import (
-    INTERVAL_DISTRIBUTIONS,
-    RETURN_DISTRIBUTIONS,
-    SPREAD_DISTRIBUTIONS,
-)
 
 _BIDS = [1.10000, 1.10001, 1.10003, 1.10002, 1.10002]
 _ASKS = [1.10020, 1.10021, 1.10023, 1.10022, 1.10022]
@@ -83,17 +79,19 @@ def test_distributions_are_looked_up_from_distributions_py_not_fitted_from_the_s
 
     calibration = compute_calibration("EURUSD", tmp_path)
 
-    assert calibration.return_distribution == RETURN_DISTRIBUTIONS["EURUSD"]
-    assert calibration.spread_distribution == SPREAD_DISTRIBUTIONS["EURUSD"]
-    assert calibration.interval_distribution == INTERVAL_DISTRIBUTIONS["EURUSD"]
+    assert calibration.return_distribution == distributions.return_distribution("EURUSD")
+    assert calibration.spread_distribution == distributions.spread_distribution("EURUSD")
+    assert calibration.interval_distribution == distributions.interval_distribution("EURUSD")
 
 
 def test_raises_on_a_symbol_with_sample_data_but_no_fitted_distribution(tmp_path: Path):
     """A sample file alone is no longer enough to calibrate a symbol - it also needs an entry in
-    distributions.py's tables (see that module's docstring on this deliberate trade-off)."""
+    distributions.py's tables (see that module's docstring on this deliberate trade-off). The
+    message comes from the accessor, so it names the first unfitted quantity and its source doc;
+    `test_distributions.py` covers the per-quantity wording."""
     _write_sample(tmp_path, symbol="NOTREGISTERED")
 
-    with pytest.raises(ValueError, match="no fitted return/spread/interval distribution"):
+    with pytest.raises(ValueError, match="no fitted return distribution"):
         compute_calibration("NOTREGISTERED", tmp_path)
 
 
@@ -164,7 +162,7 @@ def test_a_flat_sample_computes_a_valid_calibration(tmp_path: Path):
     calibration = compute_calibration("EURUSD", tmp_path)
 
     assert calibration.price_increment == Decimal("1e-5")
-    assert calibration.return_distribution == RETURN_DISTRIBUTIONS["EURUSD"]
+    assert calibration.return_distribution == distributions.return_distribution("EURUSD")
 
 
 # --- error handling on a degenerate sample -------------------------------------------------------
@@ -213,6 +211,6 @@ def test_computes_calibration_from_the_repos_real_eurusd_sample():
     calibration = compute_calibration("EURUSD")
 
     assert calibration.price_increment == Decimal("1e-5")
-    assert calibration.return_distribution == RETURN_DISTRIBUTIONS["EURUSD"]
-    assert calibration.spread_distribution == SPREAD_DISTRIBUTIONS["EURUSD"]
-    assert calibration.interval_distribution == INTERVAL_DISTRIBUTIONS["EURUSD"]
+    assert calibration.return_distribution == distributions.return_distribution("EURUSD")
+    assert calibration.spread_distribution == distributions.spread_distribution("EURUSD")
+    assert calibration.interval_distribution == distributions.interval_distribution("EURUSD")

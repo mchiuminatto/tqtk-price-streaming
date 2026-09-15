@@ -28,6 +28,7 @@ that publication boundary.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import random
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -54,6 +55,22 @@ class TickSink(Protocol):
 def _default_clock() -> int:
     """Epoch microseconds, matching the `Tick` contract's `EpochMicros` fields."""
     return time.time_ns() // 1_000
+
+
+def _derive_symbol_seed(seed: int | None, symbol: str) -> int | None:
+    """Mix `seed` with `symbol` so a single `seed` given to `run_synthetic_feed` gives each
+    concurrently-run symbol its own reproducible-but-independent draw sequence, instead of every
+    symbol's `_RandomWalk` replaying the identical sequence (they'd otherwise move in lockstep,
+    or identically when their calibrations also match).
+
+    Built on `hashlib` rather than the builtin `hash()`: string hashing is randomized per-process
+    by default (`PYTHONHASHSEED`), which would make the same `seed` produce different per-symbol
+    sequences across runs - defeating the reproducibility `seed` exists to provide.
+    """
+    if seed is None:
+        return None
+    digest = hashlib.sha256(f"{seed}:{symbol}".encode()).digest()
+    return int.from_bytes(digest[:8], "big")
 
 
 class _RandomWalk:
@@ -130,7 +147,9 @@ async def _run_symbol(
     stop: asyncio.Event,
     max_ticks: int | None,
 ) -> None:
-    walk = _RandomWalk(calibration, pacing_multiplier=pacing_multiplier, seed=seed)
+    walk = _RandomWalk(
+        calibration, pacing_multiplier=pacing_multiplier, seed=_derive_symbol_seed(seed, symbol)
+    )
     last_recv_ts = 0
     published = 0
     while not stop.is_set() and (max_ticks is None or published < max_ticks):
@@ -182,6 +201,12 @@ async def run_synthetic_feed(
     `calibrations` lets a caller (a test, or an entrypoint with its own caching) supply
     pre-computed `SymbolCalibration`s; when omitted, one is computed per symbol from `data_dir`
     (default: the repository's `data/` directory - see `calibration.compute_calibration`).
+
+    `seed`, when given, is not reused verbatim across symbols - each symbol's `_RandomWalk` is
+    seeded from `seed` mixed with that symbol's name (see `_derive_symbol_seed`), so a single fixed
+    `seed` still gives every symbol its own reproducible-but-independent sequence rather than every
+    symbol replaying the same one. `None` (the default, and what the production entrypoint always
+    passes) seeds each symbol independently from OS entropy instead.
     """
     if not symbols:
         raise ValueError("symbols must be non-empty: the adapter has nothing to generate")

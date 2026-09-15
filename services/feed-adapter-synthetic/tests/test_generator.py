@@ -183,6 +183,68 @@ def test_a_restart_produces_a_new_session_id_with_seq_reset_to_zero():
     assert [tick.seq for tick in second_sink.published] == [0, 1, 2]
 
 
+# --- a fixed seed gives each symbol its own sequence, not a shared one -------------------------
+
+
+def test_a_fixed_seed_gives_each_symbol_an_independent_sequence():
+    """A single `seed` passed to `run_synthetic_feed` must not replay identically across symbols -
+    see `generator._derive_symbol_seed`. Both symbols share the same calibration here specifically
+    so that, before the fix, they would draw byte-for-byte identical bid/ask sequences."""
+    calibration = SymbolCalibration(
+        initial_price=Decimal("1.10000"),
+        price_increment=Decimal("0.00001"),
+        return_distribution=Distribution("laplace", (0.0, 0.0005)),
+        spread_distribution=Distribution("constant", (0.0002,)),
+        interval_distribution=Distribution("constant", (1.0,)),
+    )
+    symbols = ("EURUSD", "USDJPY")
+    sink = _FakeSink()
+
+    asyncio.run(
+        run_synthetic_feed(
+            symbols,
+            pacing_multiplier=1.0,
+            sink=sink,
+            calibrations=dict.fromkeys(symbols, calibration),
+            sleep=_noop_sleep,
+            max_ticks_per_symbol=5,
+            seed=42,
+        )
+    )
+
+    by_symbol: dict[str, list[tuple[float, float]]] = {symbol: [] for symbol in symbols}
+    for tick in sink.published:
+        by_symbol[tick.symbol].append((tick.bid, tick.ask))
+    assert by_symbol["EURUSD"] != by_symbol["USDJPY"]
+
+
+def test_a_fixed_seed_still_reproduces_the_same_sequence_per_symbol_across_runs():
+    calibration = SymbolCalibration(
+        initial_price=Decimal("1.10000"),
+        price_increment=Decimal("0.00001"),
+        return_distribution=Distribution("laplace", (0.0, 0.0005)),
+        spread_distribution=Distribution("constant", (0.0002,)),
+        interval_distribution=Distribution("constant", (1.0,)),
+    )
+
+    def _run_once() -> list[tuple[float, float]]:
+        sink = _FakeSink()
+        asyncio.run(
+            run_synthetic_feed(
+                ("EURUSD",),
+                pacing_multiplier=1.0,
+                sink=sink,
+                calibrations={"EURUSD": calibration},
+                sleep=_noop_sleep,
+                max_ticks_per_symbol=5,
+                seed=42,
+            )
+        )
+        return [(tick.bid, tick.ask) for tick in sink.published]
+
+    assert _run_once() == _run_once()
+
+
 # --- calibrated price generation (task 5.4): `_RandomWalk` follows
 # `bid_t+1 = bid_t + D_R(params)`, `ask_t+1 = bid_t+1 + D_S(params)` -------------------------------
 

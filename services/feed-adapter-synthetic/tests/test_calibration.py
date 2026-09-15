@@ -184,6 +184,28 @@ def test_raises_on_an_empty_sample(tmp_path: Path):
         compute_calibration("EURUSD", tmp_path)
 
 
+def test_raises_rather_than_silently_truncating_precision_on_a_non_round_tripping_sample(
+    tmp_path: Path,
+):
+    """A `NaN` (or any price needing more than 8 decimals to round-trip) means the sample is
+    corrupt, per `_decimal_places`'s docstring - this must fail calibration, not silently produce
+    an 8-decimal `price_increment` for what is really a 5-decimal instrument."""
+    table = pa.table(
+        {
+            "time_art": pa.array(
+                [_EPOCH, _EPOCH + dt.timedelta(seconds=1), _EPOCH + dt.timedelta(seconds=2)],
+                type=pa.timestamp("ms"),
+            ),
+            "Ask": pa.array([1.10020, 1.10021, 1.10023], type=pa.float64()),
+            "Bid": pa.array([1.10000, float("nan"), 1.10003], type=pa.float64()),
+        }
+    )
+    pq.write_table(table, tmp_path / "EURUSD_Ticks_2026.01.01_2026.01.02.parquet")
+
+    with pytest.raises(ValueError, match="no price round-trips"):
+        compute_calibration("EURUSD", tmp_path)
+
+
 # --- smoke test against the repo's real sample data ---------------------------------------------
 
 

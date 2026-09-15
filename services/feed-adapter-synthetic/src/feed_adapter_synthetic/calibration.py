@@ -51,7 +51,7 @@ class SymbolCalibration:
     interval_distribution: Distribution
 
 
-def _decimal_places(prices: pa.ChunkedArray) -> int:
+def _decimal_places(prices: pa.ChunkedArray, *, symbol: str, source: Path) -> int:
     """The fewest decimal places `prices` round-trips through unchanged - the instrument's pip
     grain, per `docs/minimum-change-position.md` (a sample quoted to `1.1405` puts it at the 4th
     decimal, `101.23` at the 2nd).
@@ -68,7 +68,15 @@ def _decimal_places(prices: pa.ChunkedArray) -> int:
         rounded = pc.round(prices, ndigits=decimals)
         if pc.all(pc.equal(rounded, prices)).as_py():
             return decimals
-    return _MAX_DECIMAL_PLACES
+    # No decimal count up to _MAX_DECIMAL_PLACES round-trips every price - FX is never quoted this
+    # finely, so this means the sample is corrupt (e.g. a NaN/inf price) rather than an instrument
+    # needing more precision. Raising here (instead of silently guessing _MAX_DECIMAL_PLACES) keeps
+    # a bad sample from quietly producing a wrong price_increment, per this package's "raise rather
+    # than guess" convention - see symbols.find_data_dir/find_symbol_file.
+    raise ValueError(
+        f"{source.name!r} ({symbol!r}): no price round-trips within {_MAX_DECIMAL_PLACES} decimal "
+        "places; the Bid column likely contains a non-finite or corrupt value"
+    )
 
 
 def compute_calibration(symbol: str, data_dir: Path | None = None) -> SymbolCalibration:
@@ -100,7 +108,7 @@ def compute_calibration(symbol: str, data_dir: Path | None = None) -> SymbolCali
 
     return SymbolCalibration(
         initial_price=Decimal(str(prices[0].as_py())),
-        price_increment=Decimal(1).scaleb(-_decimal_places(prices)),
+        price_increment=Decimal(1).scaleb(-_decimal_places(prices, symbol=symbol, source=path)),
         return_distribution=return_distribution,
         spread_distribution=spread_distribution,
         interval_distribution=interval_distribution,

@@ -49,7 +49,9 @@ class Distribution:
         try:
             sampler = _SAMPLERS[self.family]
         except KeyError:
-            raise ValueError(f"no sampler registered for distribution family {self.family!r}") from None
+            raise ValueError(
+                f"no sampler registered for distribution family {self.family!r}"
+            ) from None
         return sampler(rng, self.params)
 
 

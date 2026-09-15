@@ -21,7 +21,7 @@ At ~30 ticks/s/pair:
 ```
 
 For a 1D or 4h bar, ~29 of every 30 updates change nothing a consumer cares about (occasionally a
-new high/low). A LAN consumer subscribed to all TFs for 13 symbols takes ~3,120 bar msgs/sec, almost
+new high/low). A LAN consumer subscribed to all TFs for 17 symbols takes ~4,080 bar msgs/sec, almost
 all redundant long-TF churn.
 
 Questions:
@@ -65,8 +65,8 @@ O=H=L=C=last close, or a gap in the series?)
 
 Answer:
 
-**Execution model.** One actor per `(provider, symbol, timeframe)` — 104 actors for the synthetic
-provider (13 symbols x 8 timeframes), 208 once Dukascopy is added. Each actor owns exactly one forming
+**Execution model.** One actor per `(provider, symbol, timeframe)` — 136 actors for the synthetic
+provider (17 symbols x 8 timeframes), 272 once Dukascopy is added. Each actor owns exactly one forming
 bar, its own FIFO mailbox, and its own checkpoint. Cross-timeframe isolation: a heavy 4h/1D bar
 close never sits in front of a 1s tick for the same symbol.
 
@@ -239,7 +239,8 @@ columns: time_art (timestamp[ms], local ART = UTC-3), Ask, Bid, AskVolume, BidVo
 
 All 6 in-scope majors are present (EURUSD, GBPUSD, AUDUSD, USDCAD, USDJPY, USDCHF); the folder also
 carries 7 extra crosses (AUDJPY, EURGBP, EURJPY, GBPJPY, NZDJPY, NZDUSD, USDCNH) — usable but not
-required.
+required. Since delivered, 4 more non-FX instrument samples were added: 2 equity CFDs (AAPLUSUSD,
+ARKQUSUSD) and 2 index CFDs (USA500IDXUSD, USATECHIDXUSD) — see #5 below.
 
 This is the calibration set for the `add-synthetic-feed-fidelity` change.
 
@@ -293,7 +294,7 @@ Both: AOF and RDB.
 | 2 | **Live/historical stitching** — SETTLED: one-shot bootstrap snapshot endpoint on `streaming-gateway-svc` composes `N-1` closed + 1 forming; consumer then subscribes for forming-bar updates (see below). |
 | 3 | **Bucketing timestamp** — SETTLED in Thread B: bucket by `recv_ts` (event time); late ticks past `grace` are dropped + counted in Phase 1, watermark + possible bar revisions in Phase 2. |
 | 4 | **`seq` scope & reset** — SETTLED: `uint64` monotonic per `(provider, symbol)`, starts at 0 each adapter session, paired with a `session_id`; gap detection on `(session_id, seq)` (see below). |
-| 5 | **Symbol set** — SETTLED (revises Decision #2): the symbols present in the delivered tick-sample data are the source of truth, not a fixed "6 majors" list. 13 pairs: EURUSD, GBPUSD, AUDUSD, USDCAD, USDJPY, USDCHF (majors) + AUDJPY, EURGBP, EURJPY, GBPJPY, NZDJPY, NZDUSD, USDCNH (crosses). Any future addition/removal of a symbol is driven by adding/removing its sample file in `data/`. Actor count (Thread B), bar-msg throughput (Thread A), and Redis sizing (Thread C) are all recalculated for 13 symbols. |
+| 5 | **Symbol set** — SETTLED (revises Decision #2), revised again since: the symbols present in the delivered tick-sample data are the source of truth, not a fixed "6 majors" list. 17 symbols: EURUSD, GBPUSD, AUDUSD, USDCAD, USDJPY, USDCHF (majors) + AUDJPY, EURGBP, EURJPY, GBPJPY, NZDJPY, NZDUSD, USDCNH (crosses) + AAPLUSUSD, ARKQUSUSD (equity CFDs) + USA500IDXUSD, USATECHIDXUSD (index CFDs). Any future addition/removal of a symbol is driven by adding/removing its sample file in `data/`. Actor count (Thread B), bar-msg throughput (Thread A), and Redis sizing (Thread C) are all recalculated for 17 symbols. |
 
 ### #1 — Repo / build structure (settled)
 
@@ -392,12 +393,20 @@ carry it as a separate field and keep `(session_id, seq)` as the transport-level
 
 **The tick-sample data is the source of truth for the MVP symbol set.** Decision #2 in the
 architecture doc originally fixed "6 majors." That's superseded: whichever symbols have a sample
-file under `data/*.parquet` are in scope, full stop — currently 13:
+file under `data/*.parquet` are in scope, full stop — currently 17:
 
 ```
-Majors (6):  EURUSD  GBPUSD  AUDUSD  USDCAD  USDJPY  USDCHF
-Crosses (7): AUDJPY  EURGBP  EURJPY  GBPJPY  NZDJPY  NZDUSD  USDCNH
+Majors (6):    EURUSD  GBPUSD  AUDUSD  USDCAD  USDJPY  USDCHF
+Crosses (7):   AUDJPY  EURGBP  EURJPY  GBPJPY  NZDJPY  NZDUSD  USDCNH
+Equities (2):  AAPLUSUSD  ARKQUSUSD
+Indices (2):   USA500IDXUSD  USATECHIDXUSD
 ```
+
+**Revised again: 4 non-FX instruments added.** `AAPLUSUSD`, `ARKQUSUSD`, `USA500IDXUSD`, and
+`USATECHIDXUSD` sample files were added to `data/` after the original 13-pair (6+7) set was
+settled, per this same rule — the sample data is the source of truth, so adding those files was
+sufficient with no code change. All "recalculated for 13 symbols" figures below are recalculated
+again for 17.
 
 **Why tie it to the sample data.** `feed-adapter-synthetic`'s per-symbol calibration (Thread E)
 needs a sample for every symbol it generates. Making the sample set authoritative means the symbol
@@ -405,19 +414,21 @@ list and the fidelity-calibration inputs can never drift apart — adding a symb
 `{SYMBOL}_Ticks_*.parquet` file in `data/`," not a separate config change made in two places.
 
 **Numbers this changes (recalculated above, not just relabeled):**
-- Thread A: LAN bar-message throughput ~1,440/sec -> **~3,120/sec** (13 symbols x 8 TFs x ~30/sec).
-- Thread B: actor count 48 -> **104** for synthetic alone (13 x 8 timeframes), 208 once Dukascopy
-  is added.
-- Thread C / Redis sizing: 4-6h retention ~325-500MB -> **~700MB-1.1GB**; 24h ~2-2.5GB ->
-  **~4.3-5.4GB**; the Thread C hard-cap backstop's `N` (~500MB/provider/6h) -> **~1.1GB**.
+- Thread A: LAN bar-message throughput ~1,440/sec -> **~4,080/sec** (17 symbols x 8 TFs x ~30/sec;
+  ~3,120/sec at the intermediate 13-symbol count).
+- Thread B: actor count 48 -> **136** for synthetic alone (17 x 8 timeframes), 272 once Dukascopy
+  is added (104/208 at the intermediate 13-symbol count).
+- Thread C / Redis sizing: 4-6h retention ~325-500MB -> **~900MB-1.4GB**; 24h ~2-2.5GB ->
+  **~5.7-7.1GB**; the Thread C hard-cap backstop's `N` (~500MB/provider/6h) -> **~1.4GB** (~700MB-1.1GB,
+  ~4.3-5.4GB, and ~1.1GB respectively at the intermediate 13-symbol count).
 
 **Revised again by the bid/ask side split** (settled later; see `add-price-pipeline`'s `design.md`,
 "Bid/ask carried as two side-discriminated `Bar` records"). Every bar window produces two records:
-- LAN bar-message throughput **~3,120/sec -> ~6,240/sec**, and the bar share of the Redis figures
+- LAN bar-message throughput **~4,080/sec -> ~8,160/sec**, and the bar share of the Redis figures
   above doubles with it. Tick volume and the `ticks` table are unaffected — a `Tick` already
   carried both `bid` and `ask`.
-- Persisted closed-bar rows **~13/sec -> ~27/sec (~2.3M/day)**.
-- Actor count is **unchanged at 104**: `side` is deliberately not part of the actor key, since both
+- Persisted closed-bar rows **~17/sec -> ~35/sec (~3.0M/day)**.
+- Actor count is **unchanged at 136**: `side` is deliberately not part of the actor key, since both
   sides derive from the same tick and close on the same boundary.
 
 **Not affected:** the 8-timeframe set, the per-`(provider,symbol,timeframe)` actor design itself,
@@ -440,7 +451,7 @@ only symbol-count-*multiplied*.
 | #2 live/historical stitching | Settled: one-shot bootstrap snapshot endpoint on `streaming-gateway-svc` (`N-1` closed + 1 forming, server-side stitch); consumer then subscribes for forming-bar updates. |
 | #3 timestamp authority | Settled by Thread B (`recv_ts`). |
 | #4 `seq` scope & reset | Settled: `uint64` monotonic per `(provider, symbol)`, resets to 0 each adapter session, paired with `session_id`; gap detection on `(session_id, seq)`; consumers key on `(provider, symbol, session_id, seq)`. |
-| #5 symbol set | Settled, revises Decision #2: 13 symbols (6 majors + 7 crosses), sourced from `data/*.parquet` — the sample data is the source of truth. Throughput/actor-count/Redis-sizing figures in A/B/C recalculated accordingly. |
+| #5 symbol set | Settled, revises Decision #2: 17 symbols (6 majors + 7 crosses + 2 equity CFDs + 2 index CFDs), sourced from `data/*.parquet` — the sample data is the source of truth. Throughput/actor-count/Redis-sizing figures in A/B/C recalculated accordingly. |
 
 All threads settled, including E (calibration sample, metrics, thresholds) and #5 (symbol set).
 

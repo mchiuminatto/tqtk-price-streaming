@@ -15,8 +15,8 @@ See `proposal.md` for full motivation and scope.
 
 **Non-Goals:**
 - Building `feed-adapter-dukascopy` (Java) — Phase 2, a purely additive deployment later.
-- Calibrating synthetic-feed statistical fidelity against the sample data — separate change
-  `add-synthetic-feed-fidelity`.
+- Time-of-day session modeling (Asia Pacific/Asia/London/New York) for the synthetic feed —
+  `../../../docs/synthetic-price.md` does not specify it; revisit as a later addition if needed.
 - Any cross-provider consolidated view, LAN authentication, or centralized log aggregation.
 
 ## Decisions
@@ -89,7 +89,7 @@ runtime surprise for anything that switches on `side`, so the enum is closed at 
 ### `side` lives in the record, not in the stream name or the actor key
 Streams stay `bars.{tf}.{provider}.{symbol}` and actors stay keyed
 `(provider, symbol, timeframe)`. **Alternative rejected**: `bars.{tf}.{provider}.{symbol}.{side}` —
-doubles stream count (104 → 208) and the janitor's trim bookkeeping to serve a filtering need only
+doubles stream count (136 → 272) and the janitor's trim bookkeeping to serve a filtering need only
 external clients have, and they are already filtered at the gateway subscription, not on the raw
 stream. **Alternative rejected**: `side` in the actor key — doubles actors and wheel-timer entries
 for no isolation, since both sides derive from the same tick and close on the same boundary. One
@@ -108,12 +108,12 @@ just put it — the shared fixture has no columns to `SELECT`, and the additive-
 see a key renamed inside a document, because that is an application-code edit rather than DDL. It
 also forfeits Timescale's type-aware compression (Gorilla on float columns, delta-delta on
 timestamps and counters, dictionary on the low-cardinality `provider`/`symbol`/`side`/`timeframe`
-columns) on a table taking ~2.3M rows/day, in exchange for repeating the JSON key names in every
+columns) on a table taking ~3.0M rows/day, in exchange for repeating the JSON key names in every
 row. The usual argument for JSONB — that adding a column is slow or political — is one this design
 already answered: additive migration owned by the sole writer, verified in CI. **Alternative
 rejected**: one row with eight typed price columns — keeps every enforcement property and halves
 row count, but the storage shape then stops mirroring the wire shape, adding a fold in
-`bar-persistence` and its inverse in `historical-query` for a row rate (~27/s) that is not a
+`bar-persistence` and its inverse in `historical-query` for a row rate (~35/s) that is not a
 pressure. JSONB stays the right tool for a later `provider_meta` column: sparse, per-provider, and
 never filtered on.
 
@@ -183,11 +183,117 @@ RDB gives a fast full-restore path — the pair matches the "seconds to a few ho
 target at a cost (disk I/O, dual persistence) that's affordable at this data volume.
 
 ### Symbol set sourced from the sample data, not a hardcoded list
-The synthetic feed's per-symbol fidelity calibration (a separate change) needs a sample for every
+The synthetic feed's per-symbol statistical calibration (see below) needs a sample for every
 symbol it generates. Tying the deployed symbol set to `data/*.parquet` means the two can never
 drift apart — adding a symbol is "add its sample file," not a second config edit that can go out
 of sync. **Alternative rejected**: a hardcoded symbol list (the original "6 majors" decision) —
 correct until someone adds a symbol in one place and forgets the other.
+
+### Synthetic price/tick-interval generation calibrated from sample data (`../../../docs/synthetic-price.md`)
+`_RandomWalk` previously advanced the mid price by `uniform(-step, step)` on a fixed
+`1/tick_rate_per_symbol` interval — schema-valid but statistically arbitrary, with no drift, no
+instrument-specific volatility, and no realistic tick timing. Per `../../../docs/synthetic-price.md`, each
+symbol's generator now derives four parameters once at startup from that symbol's
+`data/*.parquet` sample: return mean `μ_I` and standard deviation `σ_I` (from consecutive-price
+differences), tick-interval mean `μ_It` and standard deviation `σ_It` (from consecutive
+`provider_ts` deltas), the sample's first price as `p_0`, and its minimum price-change unit as the
+last (rightmost) decimal place present among the sample's prices — e.g. a sample quoted to
+`1.1405` puts the unit at the 4th decimal, `101.23` at the 2nd. Taken as the max decimal count
+over the whole sample, not a single price, since a value with trailing zeros in its true precision
+(`1.10000`) would otherwise understate it. The next price is `p_{t+1} = p_t + r_{t+1}`,
+`r_{t+1} ~ N(μ_I, σ_I)`; the next tick's timestamp delta is drawn `~ N(μ_It, σ_It)`. **Alternative
+rejected**: a uniform step (the prior behavior) — cheaper to compute, but produces a driftless,
+homoscedastic walk with no resemblance to real tick behavior, which is the specific defect this
+decision fixes. **Alternative rejected**: fitting a distribution offline and shipping the fitted
+parameters as static config — keeps startup cheap, but adds a build step that silently goes stale
+if `data/*.parquet` is refreshed without re-running it; deriving on startup keeps the sample file
+as the only source of truth (consistent with symbol-set discovery, above). **Alternative
+rejected**: deriving the minimum price-change unit statistically, as the smallest nonzero
+difference between consecutive prices — works, but ties a structural property of the instrument
+(how many decimals it's quoted to) to whether two ticks happen to differ by exactly one unit
+somewhere in the sample; reading the decimal count directly off the price values is simpler and
+doesn't depend on that coincidence.
+
+`tick_rate_per_symbol` (`FeedConfig`) changes meaning from an absolute rate to a pacing multiplier
+against the derived `μ_It`: `1.0` (default) publishes at the sample's own mean cadence, `>1.0`
+speeds it up, `<1.0` slows it down — the jitter shape (`σ_It`, scaled proportionally) is preserved
+at any multiplier. This keeps the existing "configurable tick pacing" requirement satisfiable (a
+test can still force a fast, deterministic rate) without discarding the sample's timing
+distribution. **Alternative rejected**: keep `tick_rate_per_symbol` as an absolute rate, ignoring
+`μ_It`/`σ_It` for timing and only using them for logging/monitoring — simpler, but leaves tick
+timing exactly as unrealistic as it is today, defeating the purpose of this change.
+
+Generated prices are rounded to the sample's minimum price-change unit before publication, so a
+generated tick never carries a precision the real instrument can't represent. Spread is
+unaffected by this decision — `_DEFAULT_SPREAD`/bid-ask handling stays exactly as implemented
+today, since `../../../docs/synthetic-price.md` doesn't specify a spread model.
+
+### Revised: return/spread/interval fit offline per family, not derived online as `N(μ,σ)`
+The decision above picked Normal for both returns and tick intervals, derived fresh from
+`data/*.parquet` at every adapter startup, and explicitly rejected shipping offline-fitted
+parameters as static config ("adds a build step that silently goes stale ... deriving on startup
+keeps the sample file as the only source of truth"). That assumption didn't survive contact with
+the actual sample data: fitting five candidate families per symbol by MLE and ranking them by AIC
+(`docs/tick-distributions.md` for returns, `docs/tick-interval-distributions.md` for tick
+interval) showed **every one of the 17 symbols rejects Normal decisively** — 13/17 returns series
+fit Laplace better, the other 4 fit Student-t; 13/17 interval series fit Log-normal better, the
+other 4 fit Log-logistic. Model *family* selection needs comparing several MLE fits by AIC, which
+means `scipy` — a dependency this feed's runtime shouldn't carry for a question that isn't a
+per-run statistic in the first place (unlike `μ`/`σ`, which genuinely could drift as the sample
+file is refreshed, "which family" doesn't change data point to data point).
+
+So the previously-rejected alternative is now the design: `distributions.py` holds each symbol's
+fitted family + parameters as a static table, populated by an offline `scipy` fit run outside this
+package, and `compute_calibration` looks the entry up by symbol instead of deriving anything
+statistical from the sample at startup. The accepted trade-off is exactly the one called out
+above: adding a new symbol now needs a row added to `distributions.py` too, not just a sample file
+dropped under `data/` (unlike `symbols.discover_symbols`) — if that drift becomes a real problem,
+the fix is re-running the offline fit and updating the docs and `distributions.py` together, not
+inventing a runtime fallback that would need `scipy` in production.
+
+**Spread is no longer a fixed constant either.** The same offline-fit exercise was run against
+spread (`Ask - Bid`), against five positive-support candidate families
+(`docs/spread-distributions.md`); every symbol rejected the implicit "spread is roughly constant"
+assumption too. `_DEFAULT_SPREAD` is gone: `_RandomWalk` now draws a fresh spread per tick from
+`SymbolCalibration.spread_distribution`, and `ask = bid + spread` — not `mid ± spread/2` around a
+synthetic midpoint, since there is no `mid` in this model any more: the walked series is the bid
+directly (per the decision above, calibrated from the sample's `Bid` column specifically), and ask
+is derived from it.
+
+`compute_calibration` no longer reads `time_art` or computes anything via `pc.subtract`/
+`pc.mean`/`pc.stddev` - `initial_price`/`price_increment` are still derived from the sample's
+`Bid` column (unchanged), but the three distributions are a dictionary lookup, not a fit.
+
+### Calibration fitted with `pyarrow.compute`, and concurrently across symbols
+A first cut of `compute_calibration` used Python-level loops (`statistics.fmean`/`pstdev` over a
+list built by `itertools.pairwise`) — correct, but measured at ~17s to fit all 13 configured
+symbols sequentially at adapter startup (some samples run to ~1M rows), during which `/ready`
+could already report Redis connected while zero ticks were actually flowing, and the single
+synchronous computation blocked the event loop from noticing a shutdown signal. Rewritten on
+`pyarrow.compute`: `pc.subtract`/`pc.mean`/`pc.stddev` run as one vectorized pass over a whole
+column in Arrow's C++ kernels rather than the Python interpreter, and the minimum price-change
+unit is now found via `pc.round`/`pc.equal` (the smallest `decimals` a price column round-trips
+through unchanged) instead of formatting every price and taking the max digit count. Measured
+result at the original 13-symbol set: ~0.4s for all 13 symbols, from ~17s. Re-measured after the
+sample set grew to 17 symbols (adding AAPLUSUSD, ARKQUSUSD, USA500IDXUSD, USATECHIDXUSD): ~0.3s
+concurrent for all 17 (~0.76s run sequentially), confirming the vectorized approach scales with
+symbol count rather than reverting to the old per-symbol cost. Each symbol's fit also runs inside
+`asyncio.to_thread` and all 17 run concurrently via `asyncio.gather`, so the (now much smaller)
+cost is paid in parallel rather than added up serially, and never blocks the event loop at all.
+**Alternative rejected**: leave the algorithm as Python loops and only add concurrency — the
+concurrency alone does not fix the per-symbol cost, only overlaps it, and 17 threads each holding
+the GIL for a CPU-bound Python loop over up to ~1M rows would contend rather than genuinely
+parallelize; the vectorized kernels release the GIL, so concurrency actually buys something.
+
+Historical note: the `pc.subtract`/`pc.mean`/`pc.stddev` return/interval fitting described above
+no longer runs at all, superseded by the offline-fit `distributions.py` lookup (see the "Revised"
+decision above) - `compute_calibration` today only reads the `Bid` column and runs the
+`pc.round`/`pc.equal` decimal-places search, so it's cheaper still than either number measured
+here.
+
+This calibration step is specific to the synthetic feed - a real provider's adapter (`dukascopy`,
+Phase 2) has no equivalent, since it publishes prices a venue actually quoted rather than
+generating them from a fitted distribution.
 
 ### Bootstrap snapshot stitched server-side on `streaming-gateway-svc`
 The gateway already holds the forming bar in memory for every `(provider, symbol, timeframe)` it
@@ -238,16 +344,16 @@ outgrows the built-in engine (e.g. multiple notification channels with routing r
 - **The hard-cap backstop trims data a slow-but-alive consumer hasn't read.** → Mitigation: only
   engages past `N` (sized to the resiliency target) and always raises a Critical alert — the loss
   is bounded to that one consumer and never silent.
-- **13 symbols (vs. the originally-estimated 6) roughly doubles LAN bar-message volume, and the
-  bid/ask split doubles it again to ~6,240 msgs/sec, with the bar share of Redis memory (total
-  4.3-5.4 GB/24h before the split) doubling alongside it.** → Mitigation: the streaming-gateway
-  slow-consumer conflation policy already absorbs the redundant long-timeframe churn driving that
-  volume, and now conflates per side (see `bar-aggregation`/`streaming-gateway` specs); sizing is
-  budgeted up front rather than discovered under load. Tick volume and the `ticks` table are
-  unaffected — a tick already carried both sides.
+- **17 symbols (vs. the originally-estimated 6, later 13 before 4 non-FX instruments were added)
+  roughly triples LAN bar-message volume, and the bid/ask split doubles it again to ~8,160
+  msgs/sec, with the bar share of Redis memory (total ~5.7-7.1 GB/24h before the split) doubling
+  alongside it.** → Mitigation: the streaming-gateway slow-consumer conflation policy already
+  absorbs the redundant long-timeframe churn driving that volume, and now conflates per side (see
+  `bar-aggregation`/`streaming-gateway` specs); sizing is budgeted up front rather than discovered
+  under load. Tick volume and the `ticks` table are unaffected — a tick already carried both sides.
 - **The bid/ask split doubles persisted bar rows.** Closed bars only:
   `1 + 1/60 + 1/300 + 1/900 + 1/1800 + 1/3600 + 1/14400 + 1/86400 ≈ 1.022` closes/sec per
-  (symbol, side), × 13 symbols × 2 sides ≈ **~27 rows/sec ≈ 2.3M rows/day**. → Mitigation: typed
+  (symbol, side), × 17 symbols × 2 sides ≈ **~35 rows/sec ≈ 3.0M rows/day**. → Mitigation: typed
   columns keep Timescale's per-column compression available (the reason the JSONB alternative was
   rejected above); a compression/retention policy is not yet specified and is the lever if storage
   growth becomes the binding constraint.
@@ -271,7 +377,7 @@ Build order (each stage independently testable against its spec before the next 
    (server and extension only — no application tables; each persistence service creates its own),
    Prometheus, Grafana (`platform-resilience`).
 3. `feed-adapter-synthetic` (`synthetic-feed`) — verify raw ticks land on
-   `ticks.raw.synthetic.{symbol}` for all 13 symbols.
+   `ticks.raw.synthetic.{symbol}` for all 17 symbols.
 4. `aggregation-svc` (`bar-aggregation`) — actor model, router, wheel timer, checkpointing;
    verify `tick_to_bar_latency_ms` stays under budget.
 5. `tick-persistence-svc` / `bar-persistence-svc` — each applies its own table's migrations on
@@ -289,4 +395,5 @@ Build order (each stage independently testable against its spec before the next 
   consuming the WebSocket directly) — explicitly deferred to when Phase 2 work starts; doesn't
   change this change's specs, approach, or tasks.
 - **Exact UTC hour ranges for the four session labels** (Asia Pacific, Asia, London, New York) —
-  belongs to `add-synthetic-feed-fidelity`, not this change.
+  time-of-day session modeling is out of scope for this change (see Non-Goals); revisit if a
+  future change adds it.

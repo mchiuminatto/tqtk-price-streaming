@@ -9,7 +9,7 @@
     --bg:#f7f8fb; --card:#ffffff; --ink:#1a2233; --muted:#5b6579;
     --line:#e2e6ee; --accent:#3b6fa0; --accent-bg:#eef4fc;
     --warn:#d98c2b; --warn-bg:#fff8ec; --code-bg:#f1f3f8;
-  }
+  }did yoiu
   *{box-sizing:border-box;}
   body{
     margin:0; background:var(--bg); color:var(--ink);
@@ -96,7 +96,7 @@
   <h2>Decisions (resolved)</h2>
   <ol class="decisions">
     <li><strong>Providers, phased.</strong> <code>synthetic</code> (configurable-rate Python tick generator) is the only <strong>active</strong> provider — build and run the whole pipeline against it now. <code>dukascopy</code> (real market data) is <strong>deferred to Phase 2</strong>: Dukascopy's JForex-API is officially Java-only (no Python bindings), and the only officially-supported language-agnostic path — Dukascopy's FIX 4.4 API — requires a $100,000 minimum deposit or institutional approval, not available now.</li>
-    <li><strong>Symbol set</strong>: 13 pairs — the symbols present in the delivered tick-sample data (<code>data/*.parquet</code>) are the source of truth. 6 majors (EURUSD, GBPUSD, AUDUSD, USDCAD, USDJPY, USDCHF) + 7 crosses (AUDJPY, EURGBP, EURJPY, GBPJPY, NZDJPY, NZDUSD, USDCNH) — for whichever provider is active.</li>
+    <li><strong>Symbol set</strong>: 17 symbols — the symbols present in the delivered tick-sample data (<code>data/*.parquet</code>) are the source of truth. 13 FX pairs: 6 majors (EURUSD, GBPUSD, AUDUSD, USDCAD, USDJPY, USDCHF) + 7 crosses (AUDJPY, EURGBP, EURJPY, GBPJPY, NZDJPY, NZDUSD, USDCNH); plus 4 non-FX instruments: 2 equity CFDs (AAPLUSUSD, ARKQUSUSD) + 2 index CFDs (USA500IDXUSD, USATECHIDXUSD) — for whichever provider is active.</li>
     <li><strong>No cross-provider consolidated view.</strong> Confirmed — per-provider tagging only, no blending, even once a second provider is active.</li>
     <li><strong>External consumers</strong>: same LAN, separate host from the pipeline itself.</li>
     <li><strong>Aggregated-price SLA = live intrabar updates.</strong> Every tick updates the currently-forming bar's O/H/L/C, not just the bar-close event.</li>
@@ -104,7 +104,7 @@
     <li><strong>Phase 1 scope</strong>: the architecture stays multi-provider-ready end-to-end (tagging, dynamic stream discovery, per-(provider,symbol) keys), but only <code>synthetic</code> is built and deployed today. Adding <code>dukascopy</code> later is a new <code>feed-adapter-dukascopy</code> deployment — no redesign of <code>aggregation-svc</code> or anything downstream.</li>
     <li><strong>Synthetic generator fidelity</strong>: the generator must approximate Dukascopy's real tick-rate and statistical properties, not just a naive random walk — it's the sole active data source for an extended period, and Phase 1 results need to be meaningfully comparable once Phase 2 (real data) arrives.</li>
     <li><strong>LAN gateway auth</strong>: LAN-only network trust is sufficient for this stage — no authentication/access-control layer required yet. Revisit if the trust boundary changes.</li>
-    <li><strong>aggregation-svc scaling</strong>: confirmed — starts as a single shared instance across the active provider(s) and all 13 symbols.</li>
+    <li><strong>aggregation-svc scaling</strong>: confirmed — starts as a single shared instance across the active provider(s) and all 17 symbols.</li>
     <li><strong>Dukascopy (Phase 2) approach</strong>: will be implemented as a Java component exposing prices over a <strong>WebSocket</strong> interface, built later. Implementation detail deferred until Phase 2 starts: whether a thin bridge republishes the WebSocket feed into Redis (preserving the existing <code>ticks.raw.dukascopy.{symbol}</code> contract) or downstream services consume the WebSocket directly.</li>
   </ol>
 
@@ -293,7 +293,7 @@
 Bar:   { provider, symbol, side, timeframe, bar_start_ts, open, high, low, close,
          tick_count, is_closed, last_update_ts }        side = "bid" | "ask"</pre>
   <p>Redis streams: <code>ticks.raw.{provider}.{symbol}</code>, <code>bars.{timeframe}.{provider}.{symbol}</code>. Postgres/TimescaleDB: <code>ticks</code> hypertable indexed on <code>(provider, symbol, recv_ts)</code>, partitioned on <code>recv_ts</code>; <code>bars</code> hypertable indexed on <code>(provider, symbol, side, timeframe, bar_start_ts)</code>, prices as typed <code>double precision</code> columns.</p>
-  <p><strong>The bid/ask side dimension.</strong> A bar is a bid series or an ask series — there is no single "the price" for an FX window — so every window produces <strong>two</strong> records, <code>side = "bid"</code> and <code>side = "ask"</code>, built from that side's price on each contributing tick, with identical <code>tick_count</code>. <code>side</code> is a field of the record, deliberately <strong>not</strong> a segment of the stream name: bar streams carry both sides (stream count stays 104, and the trim policy and checkpoint keys are untouched), while the aggregation actor stays keyed <code>(provider, symbol, timeframe)</code> and holds both side-bars, publishing the pair in one atomic bus operation. There is no <code>mid</code> side — consumers derive it. The split doubles LAN bar-message volume to <strong>~6,240 msgs/sec</strong> and persisted bar rows to <strong>~27/sec (~2.3M/day)</strong>; ticks are unaffected, since a <code>Tick</code> already carried both sides.</p>
+  <p><strong>The bid/ask side dimension.</strong> A bar is a bid series or an ask series — there is no single "the price" for an FX window — so every window produces <strong>two</strong> records, <code>side = "bid"</code> and <code>side = "ask"</code>, built from that side's price on each contributing tick, with identical <code>tick_count</code>. <code>side</code> is a field of the record, deliberately <strong>not</strong> a segment of the stream name: bar streams carry both sides (stream count stays 136, and the trim policy and checkpoint keys are untouched), while the aggregation actor stays keyed <code>(provider, symbol, timeframe)</code> and holds both side-bars, publishing the pair in one atomic bus operation. There is no <code>mid</code> side — consumers derive it. The split doubles LAN bar-message volume to <strong>~8,160 msgs/sec</strong> and persisted bar rows to <strong>~35/sec (~3.0M/day)</strong>; ticks are unaffected, since a <code>Tick</code> already carried both sides.</p>
   <p><code>seq</code> is <code>uint64</code>, monotonic and gapless <strong>per <code>(provider, symbol)</code></strong>, and <strong>resets to 0 on every feed-adapter (re)start</strong>. <code>session_id</code> identifies one adapter session for that stream, so consumers do gap detection on <code>(session_id, seq)</code> — a <code>seq</code> jump within a session is real tick loss; a <code>session_id</code> change is an expected restart, not loss. Dedup/reconciliation keys on <code>(provider, symbol, session_id, seq)</code>. See <em>Architecture-Open-Questions.md</em> §#4.</p>
 
   <h3>Two contract surfaces, both versioned</h3>
@@ -324,16 +324,16 @@ Bar:   { provider, symbol, side, timeframe, bar_start_ts, open, high, low, close
   <h2>LAN consumer delivery</h2>
   <p>External consumers are same-LAN, separate host — not localhost, not open internet. Consequence: streaming-gateway-svc and historical-query-svc (or edge-gateway, if used) need to bind to a LAN-reachable interface rather than <code>127.0.0.1</code>. Per decision #9, LAN network trust is sufficient at this stage — no authentication or access-control layer (API key, LAN-scoped auth) is added now; revisit if the trust boundary changes. LAN round-trip latency is typically sub-millisecond to a few ms — small relative to the internal budget, but a genuinely separate number, not part of it.</p>
 
-  <h2>Redis memory sizing (concrete, Phase 1: 13 symbols × 1 active provider)</h2>
-  <p>13 (provider, symbol) combinations (<code>synthetic</code> only, for now). At a representative ~30 ticks/sec/pair × 13 ≈ 390 ticks/sec total, ~100–150 bytes/entry:</p>
+  <h2>Redis memory sizing (concrete, Phase 1: 17 symbols × 1 active provider)</h2>
+  <p>17 (provider, symbol) combinations (<code>synthetic</code> only, for now — 13 FX pairs plus 4 non-FX instruments). At a representative ~30 ticks/sec/pair × 17 ≈ 510 ticks/sec total, ~100–150 bytes/entry:</p>
   <table>
     <thead><tr><th>Retention window</th><th>Approx. memory</th></tr></thead>
     <tbody>
-      <tr><td>4–6 hours</td><td>roughly 700MB–1.1GB</td></tr>
-      <tr><td>24 hours</td><td>roughly 4.3–5.4GB</td></tr>
+      <tr><td>4–6 hours</td><td>roughly 900MB–1.4GB</td></tr>
+      <tr><td>24 hours</td><td>roughly 5.7–7.1GB</td></tr>
     </tbody>
   </table>
-  <p style="font-size:0.85rem;color:var(--muted);">This roughly <strong>doubles</strong> once <code>dukascopy</code> is added as a second active provider (26 combinations: ~1.4–2.2GB for 4–6h, ~8.7–10.8GB for 24h) — worth budgeting Redis memory for that from the start. The synthetic provider's rate is fully controllable.</p>
+  <p style="font-size:0.85rem;color:var(--muted);">This roughly <strong>doubles</strong> once <code>dukascopy</code> is added as a second active provider (34 combinations: ~1.8–2.8GB for 4–6h, ~11.2–14.2GB for 24h) — worth budgeting Redis memory for that from the start. The synthetic provider's rate is fully controllable.</p>
 
   <h2>Failure isolation (blast radius, Phase 1)</h2>
   <table>

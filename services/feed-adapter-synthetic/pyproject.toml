@@ -1,10 +1,12 @@
 [project]
 name = "feed-adapter-synthetic"
 version = "0.1.0"
-description = "Configurable-rate synthetic tick generator publishing raw ticks to ticks.raw.synthetic.{symbol}."
+description = "Statistically-calibrated synthetic tick generator publishing raw ticks to ticks.raw.synthetic.{symbol}."
 requires-python = ">=3.12"
 dependencies = [
     "tqtk-common",
+    "redis>=5.0",
+    "pyarrow>=17.0",
 ]
 
 [build-system]

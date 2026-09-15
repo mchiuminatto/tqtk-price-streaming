@@ -67,17 +67,42 @@
 
 ## 5. feed-adapter-synthetic (`synthetic-feed` spec)
 
-- [ ] 5.1 Implement configurable-rate tick generation for the 13-symbol set (sourced from
-      `data/*.parquet` file names); verify a test run publishes ticks only for the configured
-      symbols and no others.
-- [ ] 5.2 Implement `provider="synthetic"` tagging, `recv_ts` stamping (monotonic per
+- [x] 5.1 Implement tick generation for the 17-symbol set (sourced from `data/*.parquet` file
+      names); verify a test run publishes ticks only for the configured symbols and no others.
+- [x] 5.2 Implement `provider="synthetic"` tagging, `recv_ts` stamping (monotonic per
       `(provider,symbol)`), and `seq`/`session_id` assignment per the data contract; verify
       `recv_ts` is non-decreasing across consecutive ticks per symbol, and a restart produces a
       new `session_id` with `seq` reset to 0.
-- [ ] 5.3 Wire tick rate to 12-factor config; verify changing the configured rate changes the
-      observed publish rate with no code change.
-- [ ] 5.4 Verify the service exposes `/health`, `/ready`, `/metrics` per the service-runtime
+- [x] 5.3 Implement per-symbol parameter derivation from sample data (`μ_I`/`σ_I` from
+      consecutive-price returns, `μ_It`/`σ_It` from consecutive `provider_ts` deltas, `p_0` as the
+      sample's first price, minimum price-change unit as the last decimal place present among the
+      sample's prices, taken as the max over the whole sample), computed once at startup per
+      symbol; verify unit tests assert the computed values against a fixture sample with known
+      statistics.
+- [x] 5.4 Replace `_RandomWalk`'s uniform step with `p_t+1 = p_t + r_t+1`,
+      `r_t+1 ~ N(μ_I, σ_I)`, rounding each price to the symbol's minimum price-change unit; verify
+      a statistical test confirms a large generated sample's mean/std approximate `μ_I`/`σ_I`
+      within tolerance, and no generated price violates the rounding unit.
+- [x] 5.5 Replace the fixed `1/tick_rate_per_symbol` sleep interval with a delta sampled from
+      `N(μ_It, σ_It)`, scaled by the configured pacing multiplier; verify a statistical test
+      confirms the generated inter-tick delays approximate the scaled `N(μ_It, σ_It)` within
+      tolerance.
+- [x] 5.6 Wire the pacing multiplier (`tick_rate_per_symbol`, reinterpreted per design.md) to
+      12-factor config; verify changing the configured multiplier changes the observed publish
+      rate with no code change.
+- [x] 5.7 Verify the service exposes `/health`, `/ready`, `/metrics` per the service-runtime
       contract.
+- [x] 5.8 Revise 5.3-5.5: replace the online `N(μ_I, σ_I)`/`N(μ_It, σ_It)` derivation with
+      per-symbol return/interval distributions (family + parameters) fit offline by AIC over
+      several candidate families and looked up from `distributions.py`
+      (`docs/tick-distributions.md`, `docs/tick-interval-distributions.md`); every one of the 17
+      symbols rejected Normal for both quantities. Add a per-symbol fitted spread distribution
+      (`docs/spread-distributions.md`), replacing the fixed `_DEFAULT_SPREAD` constant, so
+      `ask = bid + spread` is sampled fresh per tick instead of `mid ± spread/2` around a
+      synthetic midpoint; verify unit tests confirm each hand-rolled sampler (`random.Random`
+      only, no `scipy`/`numpy` at runtime) matches its family's known mean/variance/median, and
+      that `compute_calibration` raises a clear error for a symbol with sample data but no
+      registered distribution.
 
 ## 6. aggregation-svc (`bar-aggregation` spec)
 
@@ -226,5 +251,18 @@
 - [ ] 13.3 Verify failure-isolation behavior against the `platform-resilience` spec: stop
       `aggregation-svc` and confirm tick ingestion/persistence continue while bar production
       stops; restart it and confirm recovery via checkpoint.
-- [ ] 13.4 Document Compose bring-up/teardown steps (`deploy/README` or equivalent); no rollback
+- [ ] 13.4 Verify persistence-service failure isolation against the `platform-resilience` spec:
+      stop `tick-persistence-svc` (then, separately, `bar-persistence-svc`) and confirm live tick
+      ingestion and bar aggregation continue unaffected; restart the stopped service and confirm
+      buffered ticks/bars are persisted once it recovers.
+- [ ] 13.5 Verify streaming-gateway failure isolation against the `platform-resilience` spec: stop
+      `streaming-gateway-svc` and confirm LAN consumers lose the live feed while ingestion,
+      aggregation, and persistence continue unaffected; restart it and confirm consumers can
+      reconnect and resume receiving updates.
+- [ ] 13.6 Verify the recovery-time objective against the `platform-resilience` spec: for each
+      stateful component (`aggregation-svc` checkpoint recovery, a persistence service's
+      reconnect-and-drain, Redis AOF/RDB replay on restart), measure the time to resume correct
+      operation after a crash/restart and confirm it falls within the "seconds to at most a few
+      hours" target with no manual data repair.
+- [ ] 13.7 Document Compose bring-up/teardown steps (`deploy/README` or equivalent); no rollback
       procedure needed beyond standard teardown, per `design.md`'s Migration Plan.

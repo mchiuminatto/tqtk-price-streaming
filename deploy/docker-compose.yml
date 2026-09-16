@@ -119,6 +119,46 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  # Configurable-rate synthetic tick generator: publishes calibrated ticks to
+  # ticks.raw.synthetic.{symbol} for the 17-symbol set under data/*.parquet (services/
+  # feed-adapter-synthetic). Prometheus already scrapes this job name (prometheus/prometheus.yml),
+  # so it reports "up" once this is running.
+  feed-adapter-synthetic:
+    build:
+      # Repo root, not this directory - see the Dockerfile's own header: it resolves
+      # `tqtk-common` through the workspace root pyproject.toml against the shared uv.lock.
+      context: ..
+      dockerfile: services/feed-adapter-synthetic/Dockerfile
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      # Compose's own DNS name for the redis service, not the config default (localhost), which
+      # only resolves inside redis's own container.
+      TQTK_REDIS_URL: redis://redis:6379/0
+    volumes:
+      # `discover_symbols()` walks up from its own module looking for a `data/` directory - a
+      # repository-checkout asset, never baked into the image (symbols.py's own docstring). The
+      # installed venv lives under /app, so mounting the sample data at /app/data is what lets
+      # that walk-up find it from inside the container.
+      - ../data:/app/data:ro
+    healthcheck:
+      # `/health` ("is this process alive"), not `/ready` ("has it reached Redis") - restart is
+      # the right response to the first, not to a Redis outage this same stack's `depends_on`
+      # already staggers past. See tqtk_common.server's module docstring for the distinction.
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
   # Dashboards and alerting over the Prometheus data. Datasource and (from task 12.2) dashboards
   # are provisioned from files, so a clean bring-up needs no clicking to reproduce.
   grafana:

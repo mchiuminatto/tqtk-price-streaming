@@ -32,9 +32,11 @@ docker compose -f deploy/docker-compose.yml up -d
 docker compose -f deploy/docker-compose.yml ps      # every component reports (healthy)
 ```
 
-Every component publishes on loopback — Redis on `127.0.0.1:6379`, Postgres on `127.0.0.1:5432`,
-Prometheus on `127.0.0.1:9090`, Grafana on `127.0.0.1:3000` — for local tooling and tests, not to
-the LAN. The database is `tqtk`, as user `tqtk`.
+Every component a person or host tool talks to directly publishes on loopback — Redis on
+`127.0.0.1:6379`, Postgres on `127.0.0.1:5432`, Prometheus on `127.0.0.1:9090`, Grafana on
+`127.0.0.1:3000` — for local tooling and tests, not to the LAN. The database is `tqtk`, as user
+`tqtk`. Services that only Prometheus and their peers talk to, like `feed-adapter-synthetic`,
+publish nothing on the host — reachable only over the Compose network.
 
 Grafana is the one that can be widened, being the one a person opens rather than a service connects
 to. That goes through an overlay file, not a variable on the base file:

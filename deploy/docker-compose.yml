@@ -119,18 +119,37 @@ services:
       start_period: 10s
     restart: unless-stopped
 
-  # One-shot job: seeds the calibration store (symbology, instrument metadata, fitted
-  # distributions) from tools/calibration_seed/tables.py - the only writer of that keyspace - and
-  # exits. It re-runs on every `up`, so a Redis that lost its data comes back calibrated.
+  # One-shot job: applies the calibration seed script (symbology, instrument metadata, fitted
+  # distributions - the only writer of that keyspace) with redis-cli, then exits. It re-runs on
+  # every `up`, so a Redis that lost its data comes back calibrated. The stock Redis image, for its
+  # redis-cli: the script is data, mounted in, not baked into any image.
   calibration-seeder:
-    build:
-      context: ..
-      dockerfile: tools/calibration_seed/Dockerfile
+    image: redis:7.4-alpine
     depends_on:
       redis:
         condition: service_healthy
-    environment:
-      TQTK_REDIS_URL: redis://redis:6379/0
+    volumes:
+      - ./calibration/calibration.redis:/seed/calibration.redis:ro
+    # redis-cli does not understand comments, so comment and blank lines are stripped first. With
+    # commands piped on stdin redis-cli exits 0 even on an error reply or a refused connection (its
+    # `-e` flag only covers commands given as arguments), so: a `-e PING` first fails fast if Redis
+    # is unreachable, and the piped run's output is checked - with --no-raw every error reply
+    # (EXECABORT from a malformed script, which leaves the store unchanged, or an error inside EXEC)
+    # is marked `(error)`, and any one fails the seed, so the adapter never starts on it.
+    # (`$$` is Compose's escape for a literal `$`.)
+    entrypoint:
+      - sh
+      - -c
+      - |
+        set -eo pipefail
+        redis-cli -h redis -e PING > /dev/null
+        out=$$(grep -Ev '^[[:space:]]*(#|$$)' /seed/calibration.redis | redis-cli -h redis --no-raw)
+        if printf '%s\n' "$$out" | grep -q '(error)'; then
+          printf '%s\n' "$$out" | grep '(error)' >&2
+          echo "calibration seed failed; the store keeps its previous seeding" >&2
+          exit 1
+        fi
+        echo "calibration seeded"
     # Run to completion, never restart: the adapter gates on this exiting 0.
     restart: "no"
 

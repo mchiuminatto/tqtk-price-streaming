@@ -1,0 +1,449 @@
+# Calibration store seed - every value the synthetic feed is calibrated with, and the only place
+# those values are defined. Applied by the `calibration-seeder` Compose service:
+#
+#     grep -Ev '^[[:space:]]*(#|$)' calibration.redis | redis-cli -h redis --no-raw
+#
+# redis-cli does not understand comments, so comment and blank lines are stripped first. The seeder
+# fails if any reply is an `(error)` (redis-cli's own `-e` does not apply to piped commands), so the
+# adapter (which waits for the seeder to succeed) never starts on a failed seed.
+#
+# The whole file is one MULTI/EXEC transaction. Its first queued command deletes every existing
+# calibration key, so a reader sees either the previous seeding or this one - never a mix - and an
+# instrument removed from this file disappears from the store. A malformed command aborts the whole
+# transaction (EXECABORT), leaving the store as it was.
+#
+# Key layout (owned by the `calibration-store` capability; read by the adapter's CalibrationStore):
+#   symbology                              hash: venue symbol -> file symbol
+#   instrument:<venue>                     hash: pip_size, quote_currency, initial_price
+#   calib:<venue>:<quantity>:family        fitted family name
+#   calib:<venue>:<quantity>:param_count   number of parameters
+#   calib:<venue>:<quantity>:param:<n>     hash: name, value, unit (n from 0, scipy fit order)
+#   calib:symbols / calib:quantities       discovery sets
+#
+# Values are in STORED units: returns in quote units, spreads in pips (multiples of pip_size),
+# tick intervals in milliseconds. Only `loc` and `scale` carry a unit; every other parameter is a
+# dimensionless shape parameter. The adapter converts by each parameter's `unit` field alone.
+# Numbers are plain decimal strings (never scientific notation).
+
+MULTI
+
+# Delete the previous seeding (calib:*, instrument:*, symbology) inside the same transaction.
+EVAL "for _,p in ipairs(ARGV) do for _,k in ipairs(redis.call('KEYS',p)) do redis.call('DEL',k) end end return 0" 0 calib:* instrument:* symbology
+
+# Venue symbol -> file symbol. FX pairs use `BASE/QUOTE`; the CFDs use the venue's
+# `<ticker>.<market>/<quote>` notation.
+HSET symbology AAPL.US/USD AAPLUSUSD ARKQ.US/USD ARKQUSUSD AUD/JPY AUDJPY AUD/USD AUDUSD EUR/GBP EURGBP EUR/JPY EURJPY EUR/USD EURUSD GBP/JPY GBPJPY GBP/USD GBPUSD NZD/JPY NZDJPY NZD/USD NZDUSD USA500.IDX/USD USA500IDXUSD USATECH.IDX/USD USATECHIDXUSD USD/CAD USDCAD USD/CHF USDCHF USD/CNH USDCNH USD/JPY USDJPY
+
+# Per-instrument metadata.
+#
+# `initial_price` is the first `Bid` of each symbol's tick sample (`data/*.parquet`, week of
+# 2026-08-31) - the Bid, not the Bid/Ask mid, since averaging the two adds sub-grain noise.
+#
+# `pip_size` is the instrument's minimum price increment: the fewest decimal places every `Bid` in
+# that sample round-trips through unchanged. Rounding to fewer decimals than a price's true
+# precision changes it; rounding to at least that many is a no-op, so the smallest such count is
+# the sample's quoting grain - robust to a price with trailing zeros (`1.10000`), which survives
+# rounding at any count and so never lowers the answer. Two groups fall out: every FX pair quoted
+# against JPY, and all four CFDs, quote to the 3rd decimal; every other FX pair to the 5th.
+#
+# This is finer than the classical FX "pip" (the 4th decimal on non-JPY pairs, the 2nd on JPY
+# pairs): the feed quotes one digit past it - a pipette on non-JPY pairs. `pip_size` means the
+# grain actually quoted, whatever it is called, and spread parameters are stored in multiples of
+# it. The CFDs have no FX pip convention at all; the 3rd decimal is the broker's CFD convention,
+# independent of price level (a $319 stock and a 29,290-point index both quote to 3 decimals).
+#
+# `quote_currency` is the part of the venue symbol after `/`.
+HSET instrument:AAPL.US/USD pip_size 0.001 quote_currency USD initial_price 319.426
+HSET instrument:ARKQ.US/USD pip_size 0.001 quote_currency USD initial_price 121.566
+HSET instrument:AUD/JPY pip_size 0.001 quote_currency JPY initial_price 114.496
+HSET instrument:AUD/USD pip_size 0.00001 quote_currency USD initial_price 0.71659
+HSET instrument:EUR/GBP pip_size 0.00001 quote_currency GBP initial_price 0.85584
+HSET instrument:EUR/JPY pip_size 0.001 quote_currency JPY initial_price 185.215
+HSET instrument:EUR/USD pip_size 0.00001 quote_currency USD initial_price 1.15922
+HSET instrument:GBP/JPY pip_size 0.001 quote_currency JPY initial_price 216.402
+HSET instrument:GBP/USD pip_size 0.00001 quote_currency USD initial_price 1.35444
+HSET instrument:NZD/JPY pip_size 0.001 quote_currency JPY initial_price 94.556
+HSET instrument:NZD/USD pip_size 0.00001 quote_currency USD initial_price 0.59177
+HSET instrument:USA500.IDX/USD pip_size 0.001 quote_currency USD initial_price 7680.869
+HSET instrument:USATECH.IDX/USD pip_size 0.001 quote_currency USD initial_price 29290.786
+HSET instrument:USD/CAD pip_size 0.00001 quote_currency CAD initial_price 1.38902
+HSET instrument:USD/CHF pip_size 0.00001 quote_currency CHF initial_price 0.80852
+HSET instrument:USD/CNH pip_size 0.00001 quote_currency CNH initial_price 6.72294
+HSET instrument:USD/JPY pip_size 0.001 quote_currency JPY initial_price 159.773
+
+# How the three fit tables below were produced (an offline run with `scipy`/`numpy` in a
+# throwaway virtualenv - neither is a project dependency): for each symbol, five candidate
+# families were fitted by MLE on a 200k-row subsample (the largest file, USATECHIDXUSD, runs to
+# ~1.7M ticks), ranked by AIC computed over the full sample (log-likelihood penalized for
+# parameter count; lower is better), and cross-checked with a KS test. The winner's family and
+# parameters are the row. Real tick series are long quiet stretches punctuated by jumps (session
+# gaps, news) - heavy-tailed, not i.i.d. Gaussian - which is why no quantity picks Normal or
+# Exponential anywhere (cf. Cont, R. (2001), "Empirical properties of asset returns: stylized
+# facts and statistical issues").
+#
+# Returns: consecutive `Bid` differences, stored in quote units (price units, no conversion). Candidates: Normal, Student-t, Laplace,
+# Logistic, Cauchy. Every symbol rejects Normal decisively; 13 pick Laplace, 4 pick Student-t.
+#
+# - Laplace(loc, scale): every fitted `loc` is exactly 0 - the median return is a flat tick, and
+#   Laplace's MLE location is the sample median. `scale` is the mean absolute deviation.
+# - Student-t(df, loc, scale): lower `df` means fatter tails. USATECHIDXUSD and USDJPY sit near
+#   df 3 (variance barely finite); USA500IDXUSD's df ~52 is nearly Normal - the only symbol where
+#   Normal even placed second.
+# - ARKQUSUSD's extreme kurtosis (~11,600) is real, not a data bug: its three largest returns all
+#   land on the 16:59:59 -> next-day 10:30:00 overnight-close boundary.
+#
+# Runner-up and AIC margin (2nd - best) per symbol, for anyone revisiting a close call:
+# AAPLUSUSD Student-t 8,004; ARKQUSUSD Cauchy 11,933; AUDJPY Logistic 36,705; AUDUSD Logistic
+# 6,144; EURGBP Student-t 4,482; EURJPY Student-t 68,855; EURUSD Logistic 3,395; GBPJPY Student-t
+# 12,335; GBPUSD Logistic 17,434; NZDJPY Student-t 41,117; NZDUSD Logistic 16,017; USA500IDXUSD
+# Normal 18,505; USATECHIDXUSD Laplace 52,609; USDCAD Student-t 10,814; USDCHF Student-t 13,254;
+# USDCNH Student-t 18,935; USDJPY Laplace 3,538.
+
+SET calib:AAPL.US/USD:return:family laplace
+SET calib:AAPL.US/USD:return:param_count 2
+HSET calib:AAPL.US/USD:return:param:0 name loc value 0 unit quote
+HSET calib:AAPL.US/USD:return:param:1 name scale value 0.0171211 unit quote
+
+SET calib:ARKQ.US/USD:return:family laplace
+SET calib:ARKQ.US/USD:return:param_count 2
+HSET calib:ARKQ.US/USD:return:param:0 name loc value 0 unit quote
+HSET calib:ARKQ.US/USD:return:param:1 name scale value 0.00535162 unit quote
+
+SET calib:AUD/JPY:return:family laplace
+SET calib:AUD/JPY:return:param_count 2
+HSET calib:AUD/JPY:return:param:0 name loc value 0 unit quote
+HSET calib:AUD/JPY:return:param:1 name scale value 0.00124485 unit quote
+
+SET calib:AUD/USD:return:family student_t
+SET calib:AUD/USD:return:param_count 3
+HSET calib:AUD/USD:return:param:0 name df value 7.5965 unit dimensionless
+HSET calib:AUD/USD:return:param:1 name loc value -0.0000000941761 unit quote
+HSET calib:AUD/USD:return:param:2 name scale value 0.0000124265 unit quote
+
+SET calib:EUR/GBP:return:family laplace
+SET calib:EUR/GBP:return:param_count 2
+HSET calib:EUR/GBP:return:param:0 name loc value 0 unit quote
+HSET calib:EUR/GBP:return:param:1 name scale value 0.00000934852 unit quote
+
+SET calib:EUR/JPY:return:family laplace
+SET calib:EUR/JPY:return:param_count 2
+HSET calib:EUR/JPY:return:param:0 name loc value 0 unit quote
+HSET calib:EUR/JPY:return:param:1 name scale value 0.00128839 unit quote
+
+SET calib:EUR/USD:return:family laplace
+SET calib:EUR/USD:return:param_count 2
+HSET calib:EUR/USD:return:param:0 name loc value 0 unit quote
+HSET calib:EUR/USD:return:param:1 name scale value 0.0000106012 unit quote
+
+SET calib:GBP/JPY:return:family laplace
+SET calib:GBP/JPY:return:param_count 2
+HSET calib:GBP/JPY:return:param:0 name loc value 0 unit quote
+HSET calib:GBP/JPY:return:param:1 name scale value 0.00144856 unit quote
+
+SET calib:GBP/USD:return:family laplace
+SET calib:GBP/USD:return:param_count 2
+HSET calib:GBP/USD:return:param:0 name loc value 0 unit quote
+HSET calib:GBP/USD:return:param:1 name scale value 0.000011239 unit quote
+
+SET calib:NZD/JPY:return:family laplace
+SET calib:NZD/JPY:return:param_count 2
+HSET calib:NZD/JPY:return:param:0 name loc value 0 unit quote
+HSET calib:NZD/JPY:return:param:1 name scale value 0.00121249 unit quote
+
+SET calib:NZD/USD:return:family laplace
+SET calib:NZD/USD:return:param_count 2
+HSET calib:NZD/USD:return:param:0 name loc value 0 unit quote
+HSET calib:NZD/USD:return:param:1 name scale value 0.0000098903 unit quote
+
+SET calib:USA500.IDX/USD:return:family student_t
+SET calib:USA500.IDX/USD:return:param_count 3
+HSET calib:USA500.IDX/USD:return:param:0 name df value 52.279 unit dimensionless
+HSET calib:USA500.IDX/USD:return:param:1 name loc value 0.000169648 unit quote
+HSET calib:USA500.IDX/USD:return:param:2 name scale value 0.212719 unit quote
+
+SET calib:USATECH.IDX/USD:return:family student_t
+SET calib:USATECH.IDX/USD:return:param_count 3
+HSET calib:USATECH.IDX/USD:return:param:0 name df value 3.26087 unit dimensionless
+HSET calib:USATECH.IDX/USD:return:param:1 name loc value -0.0000104606 unit quote
+HSET calib:USATECH.IDX/USD:return:param:2 name scale value 0.293872 unit quote
+
+SET calib:USD/CAD:return:family laplace
+SET calib:USD/CAD:return:param_count 2
+HSET calib:USD/CAD:return:param:0 name loc value 0 unit quote
+HSET calib:USD/CAD:return:param:1 name scale value 0.0000107115 unit quote
+
+SET calib:USD/CHF:return:family laplace
+SET calib:USD/CHF:return:param_count 2
+HSET calib:USD/CHF:return:param:0 name loc value 0 unit quote
+HSET calib:USD/CHF:return:param:1 name scale value 0.00000942445 unit quote
+
+SET calib:USD/CNH:return:family laplace
+SET calib:USD/CNH:return:param_count 2
+HSET calib:USD/CNH:return:param:0 name loc value 0 unit quote
+HSET calib:USD/CNH:return:param:1 name scale value 0.000013132 unit quote
+
+SET calib:USD/JPY:return:family student_t
+SET calib:USD/JPY:return:param_count 3
+HSET calib:USD/JPY:return:param:0 name df value 2.83953 unit dimensionless
+HSET calib:USD/JPY:return:param:1 name loc value -0.0000102753 unit quote
+HSET calib:USD/JPY:return:param:2 name scale value 0.00118423 unit quote
+
+# Spread (Ask - Bid), stored in pips (multiples of the instrument's pip_size). Strictly positive in every sample, so the candidates are
+# five positive-support families: Exponential, Gamma, Log-normal, Weibull-min, Log-logistic
+# (Fisk). 11 pick Log-logistic, 2 Gamma, 4 Weibull-min; Log-normal is runner-up almost everywhere
+# Log-logistic wins - close cousins, so a stable signal rather than a coin flip.
+#
+# `loc` is pinned per symbol just below its observed minimum spread rather than fitted freely:
+# free-`loc` MLE on this heavily quantized data produced degenerate optimizer excursions (a Gamma
+# with shape ~0.05 for EURUSD, a Weibull with shape ~4e7 for USATECHIDXUSD). Pinning it also gives
+# all five candidates the same left edge, so their AICs are comparable.
+#
+# - Weibull-min(c, loc, scale): c < 1 piles mass at `loc` with a long right tail; c > 1
+#   (USATECHIDXUSD, ~3.05) is bell-shaped, pulled away from the edge.
+# - Gamma(a, loc, scale): both winners have a < 1 - an L-shaped density, so the most common
+#   spread is the minimum one.
+# - Log-logistic(c, loc, scale): median = loc + scale; larger c is tighter. USA500IDXUSD's c ~33.5
+#   is the tightest, ARKQUSUSD's ~3.6 comparatively loose.
+#
+# Spread is a different physical quantity per instrument (FX ~1e-5 to 1e-4, CFDs whole cents or
+# points), so these values are not comparable across symbols without normalizing by price level.
+#
+# Runner-up and AIC margin: AAPLUSUSD Gamma 9,941; ARKQUSUSD Log-normal 9,457; AUDJPY Weibull-min
+# 100,371; AUDUSD Log-normal 142,835; EURGBP Log-normal 40,168; EURJPY Log-normal 175,407; EURUSD
+# Weibull-min 63,905; GBPJPY Log-normal 485,893; GBPUSD Log-normal 142,441; NZDJPY Gamma 15,338;
+# NZDUSD Log-normal 240,151; USA500IDXUSD Gamma 131,627; USATECHIDXUSD Gamma 359,392; USDCAD
+# Log-normal 151,452; USDCHF Log-normal 222,026; USDCNH Log-normal 161,072; USDJPY Gamma 14,040.
+
+SET calib:AAPL.US/USD:spread:family weibull_min
+SET calib:AAPL.US/USD:spread:param_count 3
+HSET calib:AAPL.US/USD:spread:param:0 name c value 1.26909 unit dimensionless
+HSET calib:AAPL.US/USD:spread:param:1 name loc value 15.9993 unit pip
+HSET calib:AAPL.US/USD:spread:param:2 name scale value 48.0636 unit pip
+
+SET calib:ARKQ.US/USD:spread:family loglogistic
+SET calib:ARKQ.US/USD:spread:param_count 3
+HSET calib:ARKQ.US/USD:spread:param:0 name c value 3.5914 unit dimensionless
+HSET calib:ARKQ.US/USD:spread:param:1 name loc value 15.9993 unit pip
+HSET calib:ARKQ.US/USD:spread:param:2 name scale value 77.0927 unit pip
+
+SET calib:AUD/JPY:spread:family gamma
+SET calib:AUD/JPY:spread:param_count 3
+HSET calib:AUD/JPY:spread:param:0 name a value 0.28141 unit dimensionless
+HSET calib:AUD/JPY:spread:param:1 name loc value 3.99969 unit pip
+HSET calib:AUD/JPY:spread:param:2 name scale value 8.77235 unit pip
+
+SET calib:AUD/USD:spread:family loglogistic
+SET calib:AUD/USD:spread:param_count 3
+HSET calib:AUD/USD:spread:param:0 name c value 8.20604 unit dimensionless
+HSET calib:AUD/USD:spread:param:1 name loc value 0.999784 unit pip
+HSET calib:AUD/USD:spread:param:2 name scale value 7.18048 unit pip
+
+SET calib:EUR/GBP:spread:family loglogistic
+SET calib:EUR/GBP:spread:param_count 3
+HSET calib:EUR/GBP:spread:param:0 name c value 2.68703 unit dimensionless
+HSET calib:EUR/GBP:spread:param:1 name loc value 2.99981 unit pip
+HSET calib:EUR/GBP:spread:param:2 name scale value 2.9065 unit pip
+
+SET calib:EUR/JPY:spread:family loglogistic
+SET calib:EUR/JPY:spread:param_count 3
+HSET calib:EUR/JPY:spread:param:0 name c value 4.56321 unit dimensionless
+HSET calib:EUR/JPY:spread:param:1 name loc value 0.999762 unit pip
+HSET calib:EUR/JPY:spread:param:2 name scale value 6.82481 unit pip
+
+SET calib:EUR/USD:spread:family gamma
+SET calib:EUR/USD:spread:param_count 3
+HSET calib:EUR/USD:spread:param:0 name a value 0.422882 unit dimensionless
+HSET calib:EUR/USD:spread:param:1 name loc value 0.999855 unit pip
+HSET calib:EUR/USD:spread:param:2 name scale value 4.92226 unit pip
+
+SET calib:GBP/JPY:spread:family loglogistic
+SET calib:GBP/JPY:spread:param_count 3
+HSET calib:GBP/JPY:spread:param:0 name c value 6.06016 unit dimensionless
+HSET calib:GBP/JPY:spread:param:1 name loc value 3.99953 unit pip
+HSET calib:GBP/JPY:spread:param:2 name scale value 11.678 unit pip
+
+SET calib:GBP/USD:spread:family loglogistic
+SET calib:GBP/USD:spread:param_count 3
+HSET calib:GBP/USD:spread:param:0 name c value 4.96566 unit dimensionless
+HSET calib:GBP/USD:spread:param:1 name loc value 0.999859 unit pip
+HSET calib:GBP/USD:spread:param:2 name scale value 5.31058 unit pip
+
+SET calib:NZD/JPY:spread:family weibull_min
+SET calib:NZD/JPY:spread:param_count 3
+HSET calib:NZD/JPY:spread:param:0 name c value 0.819898 unit dimensionless
+HSET calib:NZD/JPY:spread:param:1 name loc value 3.99951 unit pip
+HSET calib:NZD/JPY:spread:param:2 name scale value 4.07185 unit pip
+
+SET calib:NZD/USD:spread:family loglogistic
+SET calib:NZD/USD:spread:param_count 3
+HSET calib:NZD/USD:spread:param:0 name c value 8.45018 unit dimensionless
+HSET calib:NZD/USD:spread:param:1 name loc value 0.999717 unit pip
+HSET calib:NZD/USD:spread:param:2 name scale value 7.96001 unit pip
+
+SET calib:USA500.IDX/USD:spread:family loglogistic
+SET calib:USA500.IDX/USD:spread:param_count 3
+HSET calib:USA500.IDX/USD:spread:param:0 name c value 33.4842 unit dimensionless
+HSET calib:USA500.IDX/USD:spread:param:1 name loc value 0.995785 unit pip
+HSET calib:USA500.IDX/USD:spread:param:2 name scale value 503.615 unit pip
+
+SET calib:USATECH.IDX/USD:spread:family weibull_min
+SET calib:USATECH.IDX/USD:spread:param_count 3
+HSET calib:USATECH.IDX/USD:spread:param:0 name c value 3.04864 unit dimensionless
+HSET calib:USATECH.IDX/USD:spread:param:1 name loc value 501.999 unit pip
+HSET calib:USATECH.IDX/USD:spread:param:2 name scale value 808.555 unit pip
+
+SET calib:USD/CAD:spread:family loglogistic
+SET calib:USD/CAD:spread:param_count 3
+HSET calib:USD/CAD:spread:param:0 name c value 5.00189 unit dimensionless
+HSET calib:USD/CAD:spread:param:1 name loc value 3.99967 unit pip
+HSET calib:USD/CAD:spread:param:2 name scale value 6.66425 unit pip
+
+SET calib:USD/CHF:spread:family loglogistic
+SET calib:USD/CHF:spread:param_count 3
+HSET calib:USD/CHF:spread:param:0 name c value 4.50507 unit dimensionless
+HSET calib:USD/CHF:spread:param:1 name loc value 3.99978 unit pip
+HSET calib:USD/CHF:spread:param:2 name scale value 3.75168 unit pip
+
+SET calib:USD/CNH:spread:family loglogistic
+SET calib:USD/CNH:spread:param_count 3
+HSET calib:USD/CNH:spread:param:0 name c value 4.71096 unit dimensionless
+HSET calib:USD/CNH:spread:param:1 name loc value 4.99974 unit pip
+HSET calib:USD/CNH:spread:param:2 name scale value 10.6743 unit pip
+
+SET calib:USD/JPY:spread:family weibull_min
+SET calib:USD/JPY:spread:param_count 3
+HSET calib:USD/JPY:spread:param:0 name c value 1.17157 unit dimensionless
+HSET calib:USD/JPY:spread:param:1 name loc value 0.999852 unit pip
+HSET calib:USD/JPY:spread:param:2 name scale value 3.44205 unit pip
+
+# Tick interval: time between consecutive ticks, stored in milliseconds. Non-negative and right-skewed, so the same
+# five positive-support candidates and the same pinned-`loc` fit as spread - also the textbook
+# renewal-process families (Exponential the memoryless Poisson baseline, Gamma/Weibull its
+# under/over-dispersed generalizations, Log-normal/Log-logistic multiplicative variability).
+# 13 pick Log-normal, 4 Log-logistic. Exponential never wins and is never a close runner-up: tick
+# arrivals cluster far more than a Poisson process would.
+#
+# - Log-normal(s, loc, scale): median = loc + scale seconds; `s` is the log-scale spread
+#   (NZDJPY's ~2.02 the widest, AAPLUSUSD's ~1.02 the tightest).
+# - Log-logistic(c, loc, scale): same median reading; AUDJPY/GBPJPY/USDJPY sit near c ~1, close to
+#   a heavy-tailed near-Exponential gap; USATECHIDXUSD's ~3.03 is comfortably peaked.
+# - AUDJPY is the one close call (AIC margin 115 over Log-normal); every other symbol is decisive.
+#
+# Fitted with overnight and weekend gaps left in (AAPLUSUSD/ARKQUSUSD max ~63,000 s,
+# USA500IDXUSD/USATECHIDXUSD ~6,300 s): real session boundaries, not bad rows. This deliberately
+# differs from the fidelity-acceptance metrics, which exclude the weekend gap.
+#
+# Runner-up and AIC margin: AAPLUSUSD Log-logistic 15,450; ARKQUSUSD Log-logistic 5,360; AUDJPY
+# Log-normal 115; AUDUSD Log-logistic 14,837; EURGBP Log-logistic 12,572; EURJPY Log-logistic
+# 1,531; EURUSD Log-logistic 16,675; GBPJPY Log-normal 11,023; GBPUSD Log-logistic 15,068; NZDJPY
+# Log-logistic 3,372; NZDUSD Log-logistic 15,378; USA500IDXUSD Log-logistic 12,307; USATECHIDXUSD
+# Log-normal 546,194; USDCAD Log-logistic 14,827; USDCHF Log-logistic 17,017; USDCNH Log-logistic
+# 8,563; USDJPY Log-normal 3,014.
+
+SET calib:AAPL.US/USD:interval:family lognormal
+SET calib:AAPL.US/USD:interval:param_count 3
+HSET calib:AAPL.US/USD:interval:param:0 name s value 1.0246 unit dimensionless
+HSET calib:AAPL.US/USD:interval:param:1 name loc value -13.0015 unit ms
+HSET calib:AAPL.US/USD:interval:param:2 name scale value 238.192 unit ms
+
+SET calib:ARKQ.US/USD:interval:family lognormal
+SET calib:ARKQ.US/USD:interval:param_count 3
+HSET calib:ARKQ.US/USD:interval:param:0 name s value 1.35399 unit dimensionless
+HSET calib:ARKQ.US/USD:interval:param:1 name loc value -13.0048 unit ms
+HSET calib:ARKQ.US/USD:interval:param:2 name scale value 512.815 unit ms
+
+SET calib:AUD/JPY:interval:family loglogistic
+SET calib:AUD/JPY:interval:param_count 3
+HSET calib:AUD/JPY:interval:param:0 name c value 0.902244 unit dimensionless
+HSET calib:AUD/JPY:interval:param:1 name loc value 49.6834 unit ms
+HSET calib:AUD/JPY:interval:param:2 name scale value 139.578 unit ms
+
+SET calib:AUD/USD:interval:family lognormal
+SET calib:AUD/USD:interval:param_count 3
+HSET calib:AUD/USD:interval:param:0 name s value 1.53141 unit dimensionless
+HSET calib:AUD/USD:interval:param:1 name loc value -0.24015 unit ms
+HSET calib:AUD/USD:interval:param:2 name scale value 513.165 unit ms
+
+SET calib:EUR/GBP:interval:family lognormal
+SET calib:EUR/GBP:interval:param_count 3
+HSET calib:EUR/GBP:interval:param:0 name s value 1.59028 unit dimensionless
+HSET calib:EUR/GBP:interval:param:1 name loc value -0.26072 unit ms
+HSET calib:EUR/GBP:interval:param:2 name scale value 573.163 unit ms
+
+SET calib:EUR/JPY:interval:family lognormal
+SET calib:EUR/JPY:interval:param_count 3
+HSET calib:EUR/JPY:interval:param:0 name s value 1.86543 unit dimensionless
+HSET calib:EUR/JPY:interval:param:1 name loc value 49.7566 unit ms
+HSET calib:EUR/JPY:interval:param:2 name scale value 82.5586 unit ms
+
+SET calib:EUR/USD:interval:family lognormal
+SET calib:EUR/USD:interval:param_count 3
+HSET calib:EUR/USD:interval:param:0 name s value 1.50353 unit dimensionless
+HSET calib:EUR/USD:interval:param:1 name loc value -0.242662 unit ms
+HSET calib:EUR/USD:interval:param:2 name scale value 466.108 unit ms
+
+SET calib:GBP/JPY:interval:family loglogistic
+SET calib:GBP/JPY:interval:param_count 3
+HSET calib:GBP/JPY:interval:param:0 name c value 0.994504 unit dimensionless
+HSET calib:GBP/JPY:interval:param:1 name loc value 49.6651 unit ms
+HSET calib:GBP/JPY:interval:param:2 name scale value 78.2325 unit ms
+
+SET calib:GBP/USD:interval:family lognormal
+SET calib:GBP/USD:interval:param_count 3
+HSET calib:GBP/USD:interval:param:0 name s value 1.36625 unit dimensionless
+HSET calib:GBP/USD:interval:param:1 name loc value -0.190256 unit ms
+HSET calib:GBP/USD:interval:param:2 name scale value 338.735 unit ms
+
+SET calib:NZD/JPY:interval:family lognormal
+SET calib:NZD/JPY:interval:param_count 3
+HSET calib:NZD/JPY:interval:param:0 name s value 2.02345 unit dimensionless
+HSET calib:NZD/JPY:interval:param:1 name loc value 49.3953 unit ms
+HSET calib:NZD/JPY:interval:param:2 name scale value 129.613 unit ms
+
+SET calib:NZD/USD:interval:family lognormal
+SET calib:NZD/USD:interval:param_count 3
+HSET calib:NZD/USD:interval:param:0 name s value 1.40681 unit dimensionless
+HSET calib:NZD/USD:interval:param:1 name loc value -0.311268 unit ms
+HSET calib:NZD/USD:interval:param:2 name scale value 405.276 unit ms
+
+SET calib:USA500.IDX/USD:interval:family lognormal
+SET calib:USA500.IDX/USD:interval:param_count 3
+HSET calib:USA500.IDX/USD:interval:param:0 name s value 1.3852 unit dimensionless
+HSET calib:USA500.IDX/USD:interval:param:1 name loc value 43.6958 unit ms
+HSET calib:USA500.IDX/USD:interval:param:2 name scale value 462.5 unit ms
+
+SET calib:USATECH.IDX/USD:interval:family loglogistic
+SET calib:USATECH.IDX/USD:interval:param_count 3
+HSET calib:USATECH.IDX/USD:interval:param:0 name c value 3.02613 unit dimensionless
+HSET calib:USATECH.IDX/USD:interval:param:1 name loc value 43.6933 unit ms
+HSET calib:USATECH.IDX/USD:interval:param:2 name scale value 128.119 unit ms
+
+SET calib:USD/CAD:interval:family lognormal
+SET calib:USD/CAD:interval:param_count 3
+HSET calib:USD/CAD:interval:param:0 name s value 1.47981 unit dimensionless
+HSET calib:USD/CAD:interval:param:1 name loc value -0.246778 unit ms
+HSET calib:USD/CAD:interval:param:2 name scale value 380.11 unit ms
+
+SET calib:USD/CHF:interval:family lognormal
+SET calib:USD/CHF:interval:param_count 3
+HSET calib:USD/CHF:interval:param:0 name s value 1.36899 unit dimensionless
+HSET calib:USD/CHF:interval:param:1 name loc value -0.414271 unit ms
+HSET calib:USD/CHF:interval:param:2 name scale value 410.013 unit ms
+
+SET calib:USD/CNH:interval:family lognormal
+SET calib:USD/CNH:interval:param_count 3
+HSET calib:USD/CNH:interval:param:0 name s value 1.35722 unit dimensionless
+HSET calib:USD/CNH:interval:param:1 name loc value -0.203472 unit ms
+HSET calib:USD/CNH:interval:param:2 name scale value 383.959 unit ms
+
+SET calib:USD/JPY:interval:family loglogistic
+SET calib:USD/JPY:interval:param_count 3
+HSET calib:USD/JPY:interval:param:0 name c value 0.962625 unit dimensionless
+HSET calib:USD/JPY:interval:param:1 name loc value 49.8518 unit ms
+HSET calib:USD/JPY:interval:param:2 name scale value 124.719 unit ms
+
+# Discovery sets, last: a reader lists instruments only through these.
+SADD calib:symbols AAPL.US/USD ARKQ.US/USD AUD/JPY AUD/USD EUR/GBP EUR/JPY EUR/USD GBP/JPY GBP/USD NZD/JPY NZD/USD USA500.IDX/USD USATECH.IDX/USD USD/CAD USD/CHF USD/CNH USD/JPY
+SADD calib:quantities return spread interval
+
+EXEC

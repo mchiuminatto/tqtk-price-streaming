@@ -45,7 +45,8 @@ instrument's `pip_size`), tick intervals in `ms` (milliseconds). Shape parameter
 A reader SHALL convert a parameter to price or seconds according to its `unit` field alone: a
 `pip` value multiplied by the instrument's `pip_size`, an `ms` value divided by `1000`, a `quote`
 value unchanged, and a `dimensionless` value SHALL NOT be scaled. The conversion SHALL NOT depend
-on the family name. Converting a seeded value to stored units and back SHALL reproduce it exactly.
+on the family name. The conversion SHALL be exact decimal arithmetic on the stored decimal
+string, introducing no rounding before the final value is produced.
 
 #### Scenario: A spread parameter is read
 - **WHEN** a reader reads a spread `scale` stored as `4.92226` with `unit=pip` for an instrument
@@ -70,31 +71,42 @@ the venue symbol by string manipulation.
 - **WHEN** a consumer generates ticks for venue symbol `EUR/USD`
 - **THEN** it publishes them under the file symbol `symbology` maps it to (`EURUSD`)
 
-### Requirement: Seeding tool is the only writer
-The keyspace SHALL be written only by the calibration seeding tool. Running the tool SHALL leave
-the store holding exactly the tool's calibration set: re-running it with unchanged values SHALL
-produce an identical keyspace, and an instrument removed from the tool SHALL no longer appear in
-the store after the next run. A reader SHALL never observe a mix of two seeding runs' values.
+### Requirement: Seed script is the only writer
+The keyspace SHALL be written only by applying the calibration seed script — a file of Redis
+commands — with `redis-cli`, from a dedicated one-shot seeder container separate from the adapter.
+Applying the script SHALL leave the store holding exactly the script's calibration set:
+re-applying it unchanged SHALL produce an identical keyspace, and an instrument removed from the
+script SHALL no longer appear in the store afterwards. A reader SHALL never observe a mix of two
+seedings' values. A script that fails to apply SHALL leave the store unchanged and make the seeding
+fail, so the adapter does not start on it.
 
-#### Scenario: The tool is run twice
-- **WHEN** the seeding tool is run against a store it has already seeded, with unchanged values
+#### Scenario: The script is applied twice
+- **WHEN** the seed script is applied to a store it has already seeded, unchanged
 - **THEN** every key under the calibration keyspace holds the same value as after the first run
 
-#### Scenario: An instrument is dropped from the tool
-- **WHEN** an instrument is removed from the seeding tool and the tool is re-run
+#### Scenario: An instrument is dropped from the script
+- **WHEN** an instrument's commands are removed from the seed script and the script is re-applied
 - **THEN** that instrument appears in neither `calib:symbols`, `symbology`, nor any
   `instrument:*` or `calib:*` key
 
-### Requirement: Seeding tool is the single source of truth for seeded values
+#### Scenario: The script contains a malformed command
+- **WHEN** a seed script containing a malformed command is applied
+- **THEN** no calibration key changes, the seeder exits with a failure, and the adapter is not
+  started against the result
+
+### Requirement: Seed script is the single source of truth for seeded values
 Every seeded value — each instrument's fitted return, spread and tick-interval distributions,
 `pip_size`, `quote_currency`, `initial_price` and venue/file symbology — SHALL be defined in the
-seeding tool and nowhere else. The tool SHALL NOT derive any seeded value from sample data at seed
-time, and no document in the repository SHALL restate the seeded values.
+seed script, as Redis commands carrying values in stored units, and nowhere else: not in program
+code, and not derived from sample data at seed time. No document in the repository SHALL restate
+the seeded values.
 
-#### Scenario: The tool seeds without sample data
-- **WHEN** the seeding tool runs in an environment with no `data/` directory
-- **THEN** it seeds the complete calibration set
+#### Scenario: The seeder runs without program code or sample data
+- **WHEN** the seeder container applies the seed script
+- **THEN** it seeds the complete calibration set using only `redis-cli` and the script, with no
+  application code and no `data/` directory
 
 #### Scenario: A seeded value changes
 - **WHEN** an instrument's calibration needs to change
-- **THEN** the change is made in the seeding tool alone, and no document needs a matching edit
+- **THEN** the change is made in the seed script alone, and neither code nor any document needs a
+  matching edit

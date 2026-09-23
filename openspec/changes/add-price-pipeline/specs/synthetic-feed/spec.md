@@ -21,7 +21,7 @@ USATECHIDXUSD) — and no others.
 ### Requirement: Per-instrument return distribution
 For each configured symbol, the adapter SHALL use that symbol's own fitted return distribution —
 a family (e.g. Laplace, Student-t) plus that family's parameters, selected offline by AIC over
-several candidate families and documented per symbol in `../../../../../tools/calibration_seed/tables.py`
+several candidate families and documented per symbol in `../../../../../deploy/calibration/calibration.redis`
 — rather than one fixed distribution family shared by every symbol.
 
 #### Scenario: Adapter starts
@@ -43,7 +43,7 @@ unit (derived from its sample data) before publication.
 For each configured symbol, the adapter SHALL use that symbol's own fitted spread distribution —
 a family (e.g. Weibull, Gamma, Log-logistic) plus that family's parameters, selected offline by
 AIC over several candidate positive-support families and documented per symbol in
-`../../../../../tools/calibration_seed/tables.py` — to draw a fresh spread for every tick, rather than
+`../../../../../deploy/calibration/calibration.redis` — to draw a fresh spread for every tick, rather than
 publishing a single fixed spread constant for every symbol and every tick.
 
 #### Scenario: A tick is generated
@@ -76,7 +76,7 @@ Each symbol's first generated price (`p_0`) SHALL be sourced from that symbol's 
 For each configured symbol, the adapter SHALL use that symbol's own fitted tick-interval
 distribution — a family (e.g. Log-normal, Log-logistic) plus that family's parameters, selected
 offline by AIC over several candidate positive-support families and documented per symbol in
-`../../../../../tools/calibration_seed/tables.py` — rather than one fixed distribution family
+`../../../../../deploy/calibration/calibration.redis` — rather than one fixed distribution family
 shared by every symbol.
 
 #### Scenario: Adapter starts

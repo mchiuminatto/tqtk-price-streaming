@@ -19,10 +19,11 @@ removes the checkout dependency entirely.
 - **Stored units tagged per parameter**: intervals stored in milliseconds, spreads in pips,
   returns in quote units; only `pip`/`ms`-tagged parameters are converted on read, and
   `dimensionless` shape parameters are never scaled.
-- **New seeding tool under `tools/`**: the single source of truth for every seeded value — the
-  three fitted distribution tables and per-instrument initial price, pip size and quote currency,
-  held as literal tables in its code. Idempotent; the only writer of the keyspace. Needs neither
-  `pyarrow` nor `data/`.
+- **New seed script `deploy/calibration/calibration.redis`**: the single source of truth for every
+  seeded value — the three fitted distributions and per-instrument initial price, pip size and
+  quote currency — as plain Redis commands with values in stored units, not in any code. Applied
+  with `redis-cli` by a separate one-shot seeder container (the stock Redis image, script mounted
+  in) as one atomic, idempotent transaction; the only writer of the keyspace.
 - **feed-adapter-synthetic reads calibration from Redis at startup** in one batched load, after
   Redis is reachable and before the first tick. **BREAKING** (deployment): the adapter no longer
   starts without a seeded store — missing or incomplete calibration for any discovered symbol
@@ -33,16 +34,16 @@ removes the checkout dependency entirely.
   `compute_calibration`, `_decimal_places`, `symbols.py`'s parquet discovery, the `pyarrow`
   dependency and the `../data:/app/data:ro` bind-mount.
 - **Removed from `docs/`**: `tick-distributions.md`, `spread-distributions.md`,
-  `tick-interval-distributions.md` and `minimum-change-position.md`, once the seeding tool lands —
-  each restates seeded values. Their per-symbol fit rationale and the grain-inference method move
-  into comments beside the seeding tool's tables; every reference to them is re-pointed.
+  `tick-interval-distributions.md` and `minimum-change-position.md` — each restates seeded values.
+  Their per-symbol fit rationale and the grain-inference method move into comments beside the
+  values in the seed script; every reference to them is re-pointed.
 
 ## Capabilities
 
 ### New Capabilities
 - `calibration-store`: the Redis keyspace holding per-instrument calibration, its naming (owned by
   this capability, not `data-contract`), its stored-unit conventions, its discovery sets, and the
-  seeding tool that is its only writer and the single source of truth for its values.
+  seed script that is its only writer and the single source of truth for its values.
 
 ### Modified Capabilities
 - `synthetic-feed`: symbol set, the three per-instrument distributions, the initial price and the
@@ -54,13 +55,14 @@ removes the checkout dependency entirely.
 - **Code**: `services/feed-adapter-synthetic` — new `calibration_store.py`; `distributions.py`
   keeps only `Distribution` and the samplers; `calibration.py` keeps only `SymbolCalibration`;
   `symbols.py` is removed; `generator.py`, `__main__.py`, `__init__.py`, `config.py` change.
-  New seeding package under `tools/`.
+  No seeding code: the seed values are a Redis command script.
 - **Dependencies**: `pyarrow` leaves the service; `redis>=5.0` is already declared.
-- **Deployment**: `deploy/docker-compose.yml` loses the `data/` mount and gains a one-shot seeding
-  service that the adapter waits on; a seeded store becomes a prerequisite for a running stack.
+- **Deployment**: `deploy/docker-compose.yml` loses the `data/` mount and gains a one-shot
+  `calibration-seeder` service (stock `redis:7.4-alpine`, seed script mounted) that the adapter
+  waits on; a seeded store becomes a prerequisite for a running stack.
 - **Docs and specs**: the three `docs/*-distributions.md` files and
   `docs/minimum-change-position.md` deleted; references in `docs/synthetic-price.md`, module
-  docstrings, tests, and `add-price-pipeline`'s `design.md`/`tasks.md` re-pointed to the seeding
-  tool.
+  docstrings, tests, and `add-price-pipeline`'s `design.md`/`tasks.md` re-pointed to the seed
+  script.
 - **Behavior**: none intended — the seeded values are today's tables and today's sample-derived
   initial prices and price grains, so generated ticks are statistically unchanged.

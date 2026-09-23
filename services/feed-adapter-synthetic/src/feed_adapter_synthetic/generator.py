@@ -12,8 +12,8 @@ return distribution and rounded to the instrument's minimum price-change unit; t
 fixed constant this used before per-symbol spread fitting existed. The wait before the next tick is
 drawn from that symbol's fitted tick-interval distribution, scaled by the configured pacing
 multiplier. Each symbol's `SymbolCalibration` (`calibration.py`) is loaded from the calibration
-store by the caller and passed in - the values themselves live only in the seeding tool
-(`tools/calibration_seed/tables.py`); `distributions.py` implements sampling from each family.
+store by the caller and passed in - the values themselves live only in the seed script
+(`deploy/calibration/calibration.redis`); `distributions.py` implements sampling from each family.
 
 Per that doc's Constraints section, every price value and every value derived directly from a
 price - the running bid, the sampled return and spread once drawn, the rounded/published bid and

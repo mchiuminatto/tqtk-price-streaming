@@ -19,8 +19,9 @@ See proposal.md — Why. The current shape of `services/feed-adapter-synthetic`:
 Constraints that shape the approach: the samplers and `SymbolCalibration` are correct and stay
 untouched; `tqtk_common.server.Readiness` already accepts several named dependencies; the
 `service-runtime` capability requires every *service* to expose `/health`, `/ready` and
-`/metrics`; `tools/` is not a workspace member and any change under it already triggers a full CI
-rebuild (`tools/ci/affected_members.py`, `GLOBAL_PREFIXES`); the repository has no `conftest.py`,
+`/metrics`; the stack's `redis:7.4-alpine` image ships `redis-cli`, `sh` and `grep` - but
+`redis-cli` exits 0 for commands piped on stdin even on an error reply or a refused connection
+(its `-e` flag only covers commands given as arguments); the repository has no `conftest.py`,
 no mock library and no `fakeredis` — tests hand-roll fakes (`tests/test_sinks.py`,
 `tests/test_main.py`).
 
@@ -61,21 +62,26 @@ runtime.
 **Alternative rejected**: keep reading parquet in the service and move only the distributions to
 Redis — leaves `pyarrow` and the 415 MB mount in place for two numbers per symbol.
 
-### The seeding tool holds every seeded value as a literal table
-`initial_price`, `pip_size`, `quote_currency`, venue/file symbology and the three fitted
-distributions are literal tables in the seeding tool's code. `initial_price` and `pip_size` are
-produced once, during implementation, by running today's `compute_calibration` against
-`data/*.parquet`, and written into the tool; after that the tool never reads sample data. The
-per-symbol fit rationale from `docs/tick-distributions.md`, `docs/spread-distributions.md` and
-`docs/tick-interval-distributions.md`, and the grain-inference method from
-`docs/minimum-change-position.md`, move into comments beside the tables they explain; the four
-docs are then deleted, since each restates seeded values.
+### Revised: seed values are a redis-cli command script, not code
+Every seeded value — symbology, `pip_size`, `quote_currency`, `initial_price` and the three fitted
+distributions — lives in `deploy/calibration/calibration.redis`: plain Redis commands (`SET`,
+`HSET`, `SADD`) with values already in stored units, applied by `redis-cli`. There is no seeding
+code. The per-symbol fit rationale formerly in `docs/tick-distributions.md`,
+`docs/spread-distributions.md` and `docs/tick-interval-distributions.md`, and the grain-inference
+method from `docs/minimum-change-position.md`, are `#` comments beside the commands they explain;
+the four docs are deleted, since each restates seeded values.
 
-**Alternative rejected**: derive `initial_price` and `pip_size` from parquet at seed time — keeps
-`pyarrow` and a `data/` mount on the seeder and makes the sample, not the tool, the source of
-truth for price metadata. **Alternative rejected**: keep the docs as reference — two
-hand-maintained copies of the same parameters drift, and a reader cannot tell which one the running
-system uses.
+**Historical note:** the first implementation held the values as literal Python tables in a
+`tools/calibration_seed` package, converted to stored units and written by a Python seeder image.
+That kept data in code. The script was generated once from those tables (so its content is
+identical, checked key by key before the package was deleted) and is hand-maintained from then on.
+
+**Alternative rejected**: Python tables plus a seeding program — data in code, and a program and
+image to maintain for what is a fixed list of writes. **Alternative rejected**: derive
+`initial_price` and `pip_size` from parquet at seed time — keeps `pyarrow` and a `data/` mount on
+the seeder and makes the sample, not the script, the source of truth for price metadata.
+**Alternative rejected**: keep the docs as reference — two hand-maintained copies of the same
+parameters drift, and a reader cannot tell which one the running system uses.
 
 ### `initial_price` added to the `instrument:<venue>` hash
 The originally proposed keyspace had `pip_size` and `quote_currency` on `instrument:<venue>` but no
@@ -106,15 +112,15 @@ family name. This works for every family in `_SAMPLERS` because each is linear i
 pips is meaningful.
 
 ### Unit conversion is done in `Decimal`, on the stored decimal strings
-The seeder writes each value as the shortest decimal string that round-trips its `float`
-(`repr`), converting code → stored units in `Decimal`; the reader parses with `Decimal`, converts
-stored → code units in `Decimal`, and only then calls `float()`. Because `pip_size` is a power of
-ten and `1000` is exact, both directions are exact decimal shifts, so the round trip reproduces
-every table value exactly and `SymbolCalibration` equality holds.
+The script stores every number as a plain positional decimal string (never scientific notation);
+the reader parses it with `Decimal`, converts stored → code units in `Decimal` (`pip` × `pip_size`,
+`ms` shifted three places), and only then calls `float()`. Because `pip_size` is a power of ten and
+the millisecond shift is exact, the conversion is an exact decimal shift, so the loaded parameters
+are exactly the fitted values the script was generated from.
 
-**Alternative rejected**: `float` arithmetic — `x / pip_size * pip_size` is not the identity in
-binary floating point, which would make the no-behavior-change test either flaky or loosened to a
-tolerance that could hide a real unit bug.
+**Alternative rejected**: `float` arithmetic — `x * pip_size` in binary floating point can land
+one ulp off the fitted value, which would make an equality check against the fits flaky or
+loosened to a tolerance that could hide a real unit bug.
 
 ### Venue symbols follow the venue's own notation
 FX pairs use `BASE/QUOTE` (`EUR/USD`); the CFDs use `AAPL.US/USD`, `ARKQ.US/USD`,
@@ -157,43 +163,55 @@ keyed by file symbol.
 symbols, growing linearly.
 
 ### Seeding replaces the keyspace atomically
-The seeder scans for existing `calib:*` and `instrument:*` keys plus `symbology`, then deletes them
-and writes the full new set inside one `MULTI`/`EXEC` transaction. A concurrent reader sees either
-the previous seeding or the new one, never a mix, and an instrument dropped from the tool
-disappears from the store.
+The script is one `MULTI`/`EXEC` transaction whose first queued command is an `EVAL` that deletes
+every key matching `calib:*`, `instrument:*` and `symbology`; the writes follow. A concurrent
+reader sees either the previous seeding or the new one, never a mix, and an instrument removed
+from the script disappears from the store. A malformed command aborts the whole transaction
+(`EXECABORT`), leaving the store as it was.
 
-**Alternative rejected**: overwrite in place — leaves a dropped instrument's keys behind, still
-listed nowhere but still readable, and exposes half-written state mid-run.
+**Alternative rejected**: overwrite in place — leaves a removed instrument's keys behind, still
+readable, and exposes half-written state mid-run. **Alternative rejected**: `redis-cli --scan` then
+`DEL` from the seeder's shell — the delete would not be atomic with the writes.
 
-### The seeder lives under `tools/`, runs as a one-shot Compose service
-The seeder is `tools/calibration_seed/` (run as `python -m tools.calibration_seed`, using the
-synchronous `redis` client and `TQTK_REDIS_URL`). It is not a `services/*` member: the
-`service-runtime` capability would require it to serve `/health`, `/ready` and `/metrics`, which a
-run-to-completion job has no use for. Compose runs it as `calibration-seeder` with
-`restart: "no"`, depending on Redis being healthy, and `feed-adapter-synthetic` depends on it with
-`condition: service_completed_successfully`. Its image is a small Dockerfile beside it, built from
-the repo root, installing only `redis`.
+### The seeder is the stock Redis image, run as a one-shot Compose service
+Compose runs `calibration-seeder` from `redis:7.4-alpine` — the image the stack's Redis already
+uses — with the script bind-mounted read-only. Its entrypoint strips comment and blank lines
+(`redis-cli` does not understand comments) and pipes the rest to `redis-cli -h redis --no-raw`.
+Because piped `redis-cli` exits 0 regardless, the entrypoint checks instead: a `redis-cli -e PING`
+first fails fast on an unreachable Redis, and any `(error)` in the piped run's output - `EXECABORT`
+from a malformed script, or an error inside `EXEC` - fails the seed. It has `restart: "no"` and waits
+for Redis to be healthy, and `feed-adapter-synthetic` depends on it with
+`condition: service_completed_successfully`. It is a container separate from the adapter, and not a
+`services/*` member: the `service-runtime` capability would require runtime endpoints a
+run-to-completion job has no use for.
 
-**Alternative rejected**: bake the seeder into the adapter's image — couples the writer and the
-reader's release cycle and puts seed data inside the service that must not own it.
+**Alternative rejected**: a custom seeder image — nothing to build when the stock image already has
+the only program needed, and the data stays a mounted file rather than an image layer.
+**Alternative rejected**: bake the seeding into the adapter's image — couples writer and reader and
+puts seed data inside the service that must not own it.
 
 ### Test layout
-- The seeder's tests hold the one in-memory Redis fake that supports both the seeder's writes and
-  the reader's pipelined reads, and the two cross-cutting tests: the round trip (seed → load equals
-  the tool's expected `SymbolCalibration`s) and the unit-discrimination test. They import the
-  service's `CalibrationStore`; the seeder's runtime code never does.
-- The service's tests use a smaller fake serving a prebuilt keyspace dictionary, injected through
-  `_run_service(..., redis_client=...)` as today.
+- The service's `tests/test_calibration_store.py` covers the reader with a fake serving a prebuilt
+  keyspace dictionary, and also parses the committed seed script the way the seeder feeds it to
+  `redis-cli` (comments and blank lines stripped, each line split like a shell): it checks the
+  file is one transaction that first deletes the previous seeding and otherwise only writes, that
+  the resulting keyspace loads cleanly for all 17 symbols (the loader's validation is the
+  completeness check), that every `loc`/`scale` carries its quantity's unit and every other
+  parameter is `dimensionless`, and that numbers are plain decimals.
+- `_run_service` tests inject a fake `CalibrationStore`, as they already inject `RuntimeServer`.
 - `tests/test_symbols.py` and the parquet cases in `tests/test_calibration.py` are deleted with the
-  code they cover; their equivalence obligation moves to a one-time test (below).
+  code they cover.
 - `tests/test_distributions.py` keeps the statistical sampler tests (`_N = 200_000`,
   `_SEED = 12345`) untouched; the accessor and `registered_symbols` tests go with the accessors.
+- Real `redis-cli` behaviour — quoting of the `EVAL`, transaction abort, stale-key removal — is
+  checked end to end against a real Redis (see tasks).
 
-### No-behavior-change proof is ordered before the removal
-Before any file-based code is deleted, a test asserts the seeding tool's tables equal
+### No-behavior-change proof is ordered before each removal
+Before the file-based code was deleted, a test asserted the seeded values equal
 `compute_calibration(symbol)` (reading `data/`) and the three in-module tables, for all 17 symbols.
-Only after it passes is the file-based path removed; the test is then retired with it, leaving the
-round-trip test to keep the store faithful to the tool from then on.
+Before the Python seeding tables were deleted, a test asserted the script's keyspace equals the one
+those tables produced, key by key. Each test was retired with the code it compared against; from
+then on the seed-script tests keep the script loadable and correctly tagged.
 
 ## Risks / Trade-offs
 
@@ -205,23 +223,23 @@ round-trip test to keep the store faithful to the tool from then on.
   worse.
 - [Redis loses the keyspace on restart] → Redis runs with AOF `everysec` and RDB
   (`platform-resilience`), and the seeder re-runs on every `docker compose up`.
-- [The seeder image is not built by the per-service CI image job, since `tools/` is not a member]
-  → any change under `tools/` already triggers a full rebuild and test run; the end-to-end check
-  builds it through Compose.
+- [A hand edit to the script breaks it] → a malformed command aborts the transaction and fails the
+  seeder, so the store keeps its previous seeding and the adapter does not start; the seed-script
+  tests catch a missing key, wrong unit or scientific notation before merge.
 - [Initial prices are frozen at today's sample] → intended: a refreshed sample no longer shifts
-  `p_0` silently; changing it is an edit to the tool.
+  `p_0` silently; changing it is an edit to the script.
 - [Deleting the four docs loses the fit reasoning] → the reasoning moves into comments beside the
-  tables it justifies, in the same change.
+  values it justifies in the seed script, in the same change.
 - [Re-seeding does not reach a running adapter] → accepted non-goal; restart the adapter.
 
 ## Migration Plan
 
-1. Land the seeding tool and its tests while the file-based path still exists; the equivalence
-   test proves the tool's tables match today's behavior.
+1. Land the seeded values and their tests while the file-based path still exists; the equivalence
+   test proves they match today's behavior.
 2. Land the Redis-backed read path and the Compose seeder; the adapter now starts only against a
    seeded store.
 3. Remove the file-based path, `pyarrow` and the `data/` mount; retire the equivalence test.
 4. Delete the four docs and re-point every reference.
 
 Rollback: revert the change. The previous image reads `data/` again once the mount is restored; the
-seeded keys are inert to it and can be left in place or removed with the seeder's key patterns.
+seeded keys are inert to it and can be left in place or removed with the script's delete patterns.

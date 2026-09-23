@@ -4,8 +4,8 @@
 Which family and parameters each symbol uses is not decided here: every symbol's return, spread
 and tick-interval distributions are read from the calibration store at startup
 (`calibration_store.py`), and the values themselves - with the offline fit that produced them and
-why each family won - live only in the seeding tool (`tools/calibration_seed/tables.py`).
-Parameters are in `scipy.stats.<family>.fit` order and in code units (price units for returns and
+why each family won - live only in the calibration seed script,
+`deploy/calibration/calibration.redis`. Parameters are in `scipy.stats.<family>.fit` order and in code units (price units for returns and
 spreads, seconds for intervals).
 
 `sample()` implements every family with `random.Random` alone, via standard transforms, so the

@@ -1,8 +1,0 @@
-# Replaces the root .dockerignore for tools/calibration_seed/Dockerfile only: admit the seeder's
-# runtime code and nothing else.
-*
-!tools/__init__.py
-!tools/calibration_seed/
-tools/calibration_seed/tests/
-tools/calibration_seed/Dockerfile*
-**/__pycache__/

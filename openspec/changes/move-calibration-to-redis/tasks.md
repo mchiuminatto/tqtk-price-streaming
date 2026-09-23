@@ -1,5 +1,7 @@
 ## 1. Seeding tool (`calibration-store` spec)
 
+Superseded by section 6: the Python tool built here was replaced by a Redis command script.
+
 - [x] 1.1 Create `tools/calibration_seed/` with the venue/file symbology table, the per-instrument
       `pip_size`/`quote_currency`/`initial_price` table (values produced once by running today's
       `compute_calibration` over `data/*.parquet`), and the three fitted distribution tables in
@@ -57,6 +59,8 @@
 
 ## 3. Deployment (`calibration-store` spec)
 
+3.1's custom seeder image is superseded by 6.3 (the stock Redis image).
+
 - [x] 3.1 Add `tools/calibration_seed/Dockerfile` (built from the repo root, installing only
       `redis`) and a `calibration-seeder` Compose service with `restart: "no"`, depending on Redis
       being healthy; verify `docker compose build calibration-seeder` succeeds.
@@ -100,3 +104,33 @@
       publishes nothing and exits with an error stating the store is not seeded. (Run against a
       throwaway Redis on an isolated network instead of flushing the stack's Redis, whose streams
       and checkpoints it would have destroyed.)
+
+## 6. Seed values as a redis-cli script (`calibration-store` spec)
+
+- [x] 6.1 Generate `deploy/calibration/calibration.redis` once from the Python tables: one
+      `MULTI`/`EXEC` whose first queued command is an `EVAL` deleting `calib:*`, `instrument:*` and
+      `symbology`, then `SET`/`HSET`/`SADD` with values in stored units, carrying the tables'
+      rationale as `#` comments; verify applying it with `redis-cli` to a real Redis writes the
+      same key count `build_keyspace()` produces, and a re-run removes a planted stale key while
+      keeping unrelated keys.
+- [x] 6.2 Add seed-script tests to `tests/test_calibration_store.py` (one transaction, first
+      deletes, then only writes; loads cleanly for 17 symbols; units per parameter; plain decimals)
+      plus a one-time key-by-key equivalence with the Python tables; verify all pass.
+- [x] 6.3 Switch `calibration-seeder` to `redis:7.4-alpine` with the script mounted read-only and
+      an entrypoint that strips comments and blank lines, pipes to `redis-cli -h redis --no-raw`,
+      and fails on a refused `redis-cli -e PING` or any `(error)` reply (piped `redis-cli` exits 0
+      even on errors, so `-e` alone is not enough); verify `docker compose config` shows it, the
+      adapter still waits on it, and a good seed exits 0 while a malformed script or a refused
+      connection exits 1.
+- [x] 6.4 Delete `tools/calibration_seed/`, retire the equivalence test, and re-point every
+      reference to the seed script (service docstrings and seeder hint, `docs/synthetic-price.md`,
+      `add-price-pipeline` artifacts, this change's proposal/spec/design); verify `pytest` and
+      `ruff` pass and `tools/calibration_seed` appears only in this change's history.
+- [x] 6.5 Run `calibration-seeder` and `feed-adapter-synthetic` with Compose; verify the seeder
+      exits `0`, `/ready` shows `redis` and `calibration` connected, and all 17
+      `ticks.raw.synthetic.*` streams receive new ticks.
+- [x] 6.6 On the stack's Redis, plant `calib:ZZZ/USD:return:family` and re-run the seeder; verify
+      the key is gone, `calib:symbols` is unchanged, and non-calibration keys are untouched.
+- [x] 6.7 On a throwaway Redis on an isolated network, apply a copy of the script with one
+      malformed command; verify the seeder exits non-zero, no calibration key exists, and the
+      adapter started against it exits stating the store is not seeded.

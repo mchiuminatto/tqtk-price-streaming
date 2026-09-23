@@ -1,8 +1,9 @@
 """Reads every symbol's `SymbolCalibration` from the Redis calibration store.
 
 The store - its key names, stored units and discovery sets - is the `calibration-store`
-capability; the seeding tool (`tools/calibration_seed`) is its only writer and the single source of
-truth for its values. This module is the read side:
+capability; its only writer is the seed script `deploy/calibration/calibration.redis`, applied by
+the `calibration-seeder` container with `redis-cli`, which is also the single source of truth for
+its values. This module is the read side:
 
 - `calib:symbols` lists venue symbols (`EUR/USD`); `symbology` maps each to the file symbol
   (`EURUSD`) used on the wire. The mapping is never derived by string manipulation.
@@ -13,8 +14,8 @@ truth for its values. This module is the read side:
 
 Stored units are converted to code units by each parameter's `unit` alone, never by family name:
 `pip` x `pip_size` (spreads), `ms` / 1000 (intervals), `quote` and `dimensionless` unchanged. The
-arithmetic is `Decimal` on the stored decimal strings, so it is an exact decimal shift and yields
-exactly the float the seeder started from.
+arithmetic is `Decimal` on the stored decimal strings, so it is an exact decimal shift - no binary
+floating-point error is introduced before the final conversion to `float`.
 
 `load` validates the whole keyspace before returning and raises `CalibrationError` naming the
 symbol and key on the first problem - no fallback, no partial result, per this package's "raise
@@ -45,7 +46,10 @@ _INSTRUMENT_FIELDS: Final = ("pip_size", "quote_currency", "initial_price")
 _PARAM_FIELDS: Final = ("name", "value", "unit")
 _UNITS: Final = frozenset({"quote", "pip", "ms", "dimensionless"})
 
-_SEEDER_HINT: Final = "run the calibration seeder (`python -m tools.calibration_seed`)"
+_SEEDER_HINT: Final = (
+    "run the `calibration-seeder` Compose service "
+    "(it applies `deploy/calibration/calibration.redis`)"
+)
 
 
 class CalibrationError(ValueError):

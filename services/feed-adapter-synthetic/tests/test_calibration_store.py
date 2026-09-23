@@ -1,14 +1,18 @@
 """Verification for tasks 2.1 and 2.2: `CalibrationStore` loads in three round trips, converts
-stored units by `unit` alone, and refuses an incomplete store naming the symbol and key.
+stored units by `unit` alone, and refuses an incomplete store naming the symbol and key - and for
+the committed seed script (`deploy/calibration/calibration.redis`): it is one transaction of plain
+writes, it loads cleanly, and every parameter carries the right unit.
 
-The keyspace here is built inline rather than by the seeding tool, so these stay tests of the read
-side; the seed -> load round trip over the real tables lives in the tool's own suite.
+Most keyspaces here are built inline, so those stay tests of the read side; the seed-script
+section parses the real file the `calibration-seeder` container applies.
 """
 
 from __future__ import annotations
 
 import asyncio
+import shlex
 from decimal import Decimal
+from pathlib import Path
 from typing import Any, Self
 
 import pytest
@@ -166,7 +170,7 @@ def _assert_rejected(keyspace: dict[str, Any], *fragments: str) -> None:
 def test_absent_symbol_set_means_not_seeded() -> None:
     keyspace = _keyspace()
     del keyspace["calib:symbols"]
-    _assert_rejected(keyspace, "not seeded", "calib:symbols", "python -m tools.calibration_seed")
+    _assert_rejected(keyspace, "not seeded", "calib:symbols", "calibration-seeder")
 
 
 def test_empty_symbol_set_means_not_seeded() -> None:
@@ -266,3 +270,80 @@ def test_one_bad_symbol_rejects_the_whole_load() -> None:
     keyspace = _keyspace(3)
     del keyspace["calib:X2/USD:spread:family"]
     _assert_rejected(keyspace, "'X2/USD'")
+
+
+# --- the committed seed script ----------------------------------------------------------------
+
+_SEED_SCRIPT = Path(__file__).resolve().parents[3] / "deploy" / "calibration" / "calibration.redis"
+_DELETE_PREVIOUS_SEEDING = ["calib:*", "instrument:*", "symbology"]
+_LOCATION_SCALE_UNITS = {"return": "quote", "spread": "pip", "interval": "ms"}
+
+
+def _seed_commands() -> list[list[str]]:
+    """The script's commands as `redis-cli` receives them: the seeder strips comment and blank
+    lines (`grep -Ev '^[[:space:]]*(#|$)'`) and redis-cli splits each line like a shell would."""
+    lines = (line.strip() for line in _SEED_SCRIPT.read_text().splitlines())
+    return [shlex.split(line) for line in lines if line and not line.startswith("#")]
+
+
+def _keyspace_from_seed_script() -> dict[str, Any]:
+    keyspace: dict[str, Any] = {}
+    for command, *args in _seed_commands()[2:-1]:
+        if command == "SET":
+            name, value = args
+            keyspace[name] = value
+        elif command == "HSET":
+            name, *pairs = args
+            keyspace.setdefault(name, {}).update(zip(pairs[0::2], pairs[1::2], strict=True))
+        elif command == "SADD":
+            name, *members = args
+            keyspace.setdefault(name, set()).update(members)
+        else:
+            raise AssertionError(f"unexpected command in the seed script body: {command}")
+    return keyspace
+
+
+def test_seed_script_is_one_transaction_that_first_deletes_the_previous_seeding() -> None:
+    commands = _seed_commands()
+
+    assert commands[0] == ["MULTI"]
+    assert commands[1][0] == "EVAL"
+    assert commands[1][2:] == ["0", *_DELETE_PREVIOUS_SEEDING]
+    assert commands[-1] == ["EXEC"]
+    assert {command for command, *_ in commands[2:-1]} <= {"SET", "HSET", "SADD"}
+
+
+def test_seed_script_loads_every_symbol() -> None:
+    # `load` validates the whole keyspace - families, parameter counts, units, instrument fields -
+    # so loading cleanly is the completeness check.
+    calibrations = _load(_keyspace_from_seed_script())
+
+    assert len(calibrations) == 17
+    assert "EURUSD" in calibrations
+
+
+def test_seed_script_tags_every_parameter_with_its_unit() -> None:
+    keyspace = _keyspace_from_seed_script()
+    params = [
+        (key.split(":")[2], fields)
+        for key, fields in keyspace.items()
+        if key.startswith("calib:") and ":param:" in key
+    ]
+
+    assert params
+    for quantity, fields in params:
+        expected = (
+            _LOCATION_SCALE_UNITS[quantity]
+            if fields["name"] in ("loc", "scale")
+            else "dimensionless"
+        )
+        assert fields["unit"] == expected, (quantity, fields)
+
+
+def test_seed_script_numbers_are_plain_decimals() -> None:
+    for key, fields in _keyspace_from_seed_script().items():
+        if key.startswith("instrument:") or ":param:" in key:
+            for field in ("pip_size", "initial_price", "value"):
+                if field in fields:
+                    assert "e" not in fields[field].lower(), (key, field, fields[field])
+                    Decimal(fields[field])

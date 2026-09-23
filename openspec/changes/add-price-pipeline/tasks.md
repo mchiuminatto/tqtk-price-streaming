@@ -95,9 +95,9 @@
 - [x] 5.8 Revise 5.3-5.5: replace the online `N(μ_I, σ_I)`/`N(μ_It, σ_It)` derivation with
       per-symbol return/interval distributions (family + parameters) fit offline by AIC over
       several candidate families and looked up from `distributions.py`
-      (fits now in `tools/calibration_seed/tables.py`); every one of the 17
+      (fits now in `deploy/calibration/calibration.redis`); every one of the 17
       symbols rejected Normal for both quantities. Add a per-symbol fitted spread distribution
-      (`SPREAD_FITS` in `tools/calibration_seed/tables.py`), replacing the fixed `_DEFAULT_SPREAD` constant, so
+      (now in `deploy/calibration/calibration.redis`), replacing the fixed `_DEFAULT_SPREAD` constant, so
       `ask = bid + spread` is sampled fresh per tick instead of `mid ± spread/2` around a
       synthetic midpoint; verify unit tests confirm each hand-rolled sampler (`random.Random`
       only, no `scipy`/`numpy` at runtime) matches its family's known mean/variance/median, and

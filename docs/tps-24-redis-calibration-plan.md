@@ -33,19 +33,8 @@ this repo's existing `synthetic-feed` spec, and decisions taken in planning.
 | Scope | Everything: distributions, instrument data (`initial_price`/`price_increment`), **and** symbol discovery. Parquet/`pyarrow` leave the runtime path. |
 | Seeding | In scope — this change ships a loader tool. |
 | Missing/partial data | **Fail fast at startup.** No fallback to the in-module tables. |
-| `docs/redis-calibration-plan.md` | Adopt **section B2's keyspace and unit conventions only**. Ignore its Part A entirely. |
+| Keyspace & units | Adopt the calibration-store keyspace and stored-unit conventions defined below. |
 | OpenSpec route | `/opsx:sync` `add-price-pipeline` first, then a **new change** with a proper `MODIFIED` delta. |
-
-### One thing to know about `docs/redis-calibration-plan.md`
-
-That file is not a design doc for this pipeline. It is a plan for authoring an *evaluation task* in a
-separate repo, in which this repo is the problem source and an agent under test must fetch
-calibration through an MCP gateway. Its "Part A" prescribes reducing `distributions.py` to
-`NotImplementedError` stubs and deleting `docs/tick-distributions.md`,
-`docs/spread-distributions.md` and `docs/tick-interval-distributions.md` so the answer isn't present
-in the repo. **None of that is in scope here.** We take only its section B2 (keyspace + unit
-conventions). Its own risk R1 is consistent with this: it wants the upstream calibration-store
-integration to be genuine forward work, which is exactly what TPS-24 is.
 
 ---
 
@@ -96,7 +85,7 @@ Follow `add-price-pipeline/proposal.md`'s headings exactly: `## Why` → `## Wha
 
 New capability, so it opens with `## Purpose` (that seeds the main spec on the next sync). Cover:
 
-- **Keyspace** — verbatim from B2: `symbology` hash (venue → file symbol),
+- **Keyspace**: `symbology` hash (venue → file symbol),
   `instrument:<venue>` hash, `calib:<venue>:<quantity>:family`,
   `calib:<venue>:<quantity>:param_count`, `calib:<venue>:<quantity>:param:<n>` hashes carrying
   `name`/`value`/`unit`, plus `SADD calib:symbols` and `SADD calib:quantities` as the discovery
@@ -171,11 +160,11 @@ itself revised an earlier decision without deleting it. Decisions to record:
 
 #### Open question to resolve in `design.md`
 
-**B2's keyspace has no field for `p_0`.** It defines `instrument:<venue>` with `pip_size` and
+**The keyspace has no field for `p_0`.** It defines `instrument:<venue>` with `pip_size` and
 `quote_currency`, but `initial_price` currently comes from the parquet's first `Bid`
 (`calibration.py:96`). Since parquet is leaving the runtime, the keyspace needs one more field —
 propose `initial_price` on the `instrument:<venue>` hash, seeded from the sample. Flag this
-explicitly as an extension beyond B2 rather than slipping it in, and note that `pip_size` must
+explicitly as an extension to the keyspace rather than slipping it in, and note that `pip_size` must
 agree with the grain `_decimal_places` infers from the same sample — the seeding tool derives both
 from one read, so they cannot disagree by construction.
 
@@ -236,7 +225,7 @@ Planning only until this point — `propose`/`update` must not touch code.
 
 Under `tools/` (already in the root `testpaths = ["contracts","libs","services","tools"]`, so its
 tests are collected automatically). It owns the moved parquet code and the three fitted tables, and
-writes the B2 keyspace — converting **code units → stored units** on the way in (the inverse of
+writes the calibration-store keyspace — converting **code units → stored units** on the way in (the inverse of
 what the reader does), which is what makes the round-trip test below meaningful.
 
 ### Tests
@@ -283,8 +272,6 @@ moments vs. textbook values at `rel=0.02..0.05`) stay untouched — the samplers
 
 - Re-deriving the fits. The seeded values are the existing tables; no new `scipy` run.
 - Touching `tick-distributions.md`, `spread-distributions.md`, `tick-interval-distributions.md`, or
-  stubbing `distributions.py` — that is `redis-calibration-plan.md`'s Part A, and it is explicitly
-  out of scope.
-- MCP gateway, read-only Redis ACL users, network isolation — all Part B of that doc, in the other
-  repo.
+  stubbing `distributions.py`.
+- MCP gateway, read-only Redis ACL users, network isolation.
 - The other 44 open `add-price-pipeline` tasks.

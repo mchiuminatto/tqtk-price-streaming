@@ -71,8 +71,7 @@ seeding tool fills Redis so the stack still runs end to end.
 Re-fitting the distributions, the MCP gateway and Redis access controls, and the other 44
 `add-price-pipeline` tasks.
 
-## Loose ends in the plan
+## Open question in the plan
 
-- The synthetic-feed section says "five requirements change", but its table lists six.
-- Where `initial_price` is stored is still open. The plan proposes adding it to the
-  `instrument:<venue>` hash.
+Where `initial_price` is stored is still open. The plan proposes adding it to the
+`instrument:<venue>` hash.

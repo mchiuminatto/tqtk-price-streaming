@@ -112,7 +112,7 @@ capabilities. Cover:
 
 ⚠️ A `MODIFIED` block must carry the **whole** requirement — body plus every scenario that survives.
 `openspec validate` and `openspec archive` both reject one that drops a scenario the main spec still
-has. Five requirements change (current text in
+has. Six requirements change (current text in
 `openspec/changes/add-price-pipeline/specs/synthetic-feed/spec.md`):
 
 | Requirement | Change |

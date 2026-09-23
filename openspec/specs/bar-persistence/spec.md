@@ -1,0 +1,99 @@
+# bar-persistence Specification
+
+## Purpose
+
+Durably persists every closed bar into the system of record, idempotently, tolerating temporary
+database outages without losing bars within the retention window.
+
+## Requirements
+
+### Requirement: Sole writer of the bars table
+The bar-persistence service SHALL be the only writer of the `bars` table.
+
+#### Scenario: A bar row is written
+- **WHEN** a row is written to the `bars` table
+- **THEN** it was written by the bar-persistence service, not by any other component
+
+### Requirement: Closed bars only
+The service SHALL persist only bar records where `is_closed = true`. It SHALL NOT write a row
+for an intrabar (forming) update.
+
+#### Scenario: An intrabar update is published
+- **WHEN** a bar update with `is_closed = false` is published
+- **THEN** the bar-persistence service does not write a row for it
+
+### Requirement: Idempotent upsert
+The service SHALL upsert bar rows keyed on `(provider, symbol, side, timeframe, bar_start_ts)`, so
+a repeated delivery of the same closed bar overwrites the existing row rather than creating a
+duplicate.
+
+#### Scenario: The same closed bar is delivered twice
+- **WHEN** the same closed bar (identified by `provider`, `symbol`, `side`, `timeframe`,
+  `bar_start_ts`) is delivered more than once — e.g. re-emitted after a crash recovery
+- **THEN** the stored row is overwritten in place, and no duplicate row or doubled `tick_count`
+  results
+
+#### Scenario: Both sides of one window are stored
+- **WHEN** the `bid` and `ask` records for one bar window are persisted
+- **THEN** they occupy two distinct rows, told apart only by `side`, and neither overwrites the
+  other
+
+### Requirement: Both sides of a window written in one transaction
+The two side-rows for one `(provider, symbol, timeframe, bar_start_ts)` SHALL be written within a
+single transaction, so a reader never observes a window with one side stored and the other
+missing.
+
+#### Scenario: A reader queries during a batch write
+- **WHEN** a read-side consumer queries `bars` while a batch containing both sides of a window is
+  being written
+- **THEN** it sees either both side-rows for that window or neither, never one alone
+
+#### Scenario: The write fails partway
+- **WHEN** the database rejects or the connection drops midway through writing a window's rows
+- **THEN** neither side-row is committed, and the closed bars remain unacknowledged on the bus for
+  a later retry
+
+### Requirement: Consumer-group horizontal scaling
+The service SHALL scale horizontally via Redis consumer groups such that each closed bar is
+persisted exactly once (per the idempotent-upsert guarantee) across the fleet.
+
+#### Scenario: Multiple instances run concurrently
+- **WHEN** more than one bar-persistence instance is running against the same streams
+- **THEN** no closed bar is lost and none produces more than one final row
+
+### Requirement: Outage buffering
+While the database is unavailable, the service SHALL stop acknowledging consumed stream entries
+so that unpersisted closed bars remain on the bus, bounded by the retention/trim policy, rather
+than being lost.
+
+#### Scenario: Database becomes unavailable
+- **WHEN** the database is unavailable for a period within the resiliency target
+- **THEN** closed bars published during that period remain retrievable from the bus and are
+  persisted once the database recovers
+
+### Requirement: Live-pipeline isolation
+The bar-persistence service being unavailable SHALL NOT affect live tick ingestion or
+aggregation.
+
+#### Scenario: Bar-persistence service is down
+- **WHEN** the bar-persistence service is down
+- **THEN** feed adapters and aggregation continue operating unaffected
+
+### Requirement: Owns the bars table schema
+The bar-persistence service SHALL own the `bars` table's DDL and migrations, applying them on
+startup before it begins consuming. Its migrations SHALL conform to the additive-only rule of the
+`data-contract` capability, and it SHALL declare the `schema_version` it produces.
+
+#### Scenario: The service starts against an empty database
+- **WHEN** the bar-persistence service starts against a database with no `bars` table
+- **THEN** it applies its migrations to create the table and its indexes, and only then reports
+  ready and begins consuming
+
+#### Scenario: The service starts against an up-to-date database
+- **WHEN** the service starts against a database already at its declared `schema_version`
+- **THEN** it applies no migration, reports ready, and begins consuming
+
+#### Scenario: Contract conformance is verified
+- **WHEN** the service's storage contract test runs
+- **THEN** it asserts the schema its migrations produce matches the declared `schema_version` in
+  the storage contract artifact

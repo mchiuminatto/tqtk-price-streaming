@@ -34,6 +34,8 @@ this repo's existing `synthetic-feed` spec, and decisions taken in planning.
 | Seeding | In scope — this change ships a loader tool. |
 | Missing/partial data | **Fail fast at startup.** No fallback to the in-module tables. |
 | Keyspace & units | Adopt the calibration-store keyspace and stored-unit conventions defined below. |
+| Source of truth for seeded values | The seeding tool **only**. Distributions, instrument metadata and initial prices live in its code and nowhere else; `docs/tick-distributions.md`, `docs/spread-distributions.md` and `docs/tick-interval-distributions.md` are deleted once the tool lands. |
+| Key-naming ownership | `calibration-store` owns its own keyspace, stated in its `## Purpose`. `data-contract`'s `Stream and key naming` is **not** extended. |
 | OpenSpec route | `/opsx:sync` `add-price-pipeline` first, then a **new change** with a proper `MODIFIED` delta. |
 
 ---
@@ -83,7 +85,11 @@ Follow `add-price-pipeline/proposal.md`'s headings exactly: `## Why` → `## Wha
 
 ### `specs/calibration-store/spec.md` — `## ADDED Requirements`
 
-New capability, so it opens with `## Purpose` (that seeds the main spec on the next sync). Cover:
+New capability, so it opens with `## Purpose` (that seeds the main spec on the next sync). The
+purpose SHALL state that this capability owns the naming of its own keyspace — `symbology`,
+`instrument:*`, `calib:*` — so that `data-contract`'s `Stream and key naming` keeps owning only the
+market-data path (`ticks.raw.*`, `bars.*`, `bar_state:*`) and no key family is owned by two
+capabilities. Cover:
 
 - **Keyspace**: `symbology` hash (venue → file symbol),
   `instrument:<venue>` hash, `calib:<venue>:<quantity>:family`,
@@ -99,6 +105,8 @@ New capability, so it opens with `## Purpose` (that seeds the main spec on the n
 - **Venue vs. file symbology** — the store is keyed by venue symbol (`EUR/USD`); the wire contract
   and code use file symbols (`EURUSD`). The `symbology` hash is the only mapping.
 - **Seeding is reproducible** — the tool is the only writer; re-running it is idempotent.
+- **Single source of truth** — the seeding tool is the only place the seeded values (fitted
+  distributions, instrument metadata, initial prices) are defined. No document restates them.
 
 ### `specs/synthetic-feed/spec.md` — `## MODIFIED Requirements`
 
@@ -110,9 +118,9 @@ has. Five requirements change (current text in
 | Requirement | Change |
 |---|---|
 | `Symbol set` | Source becomes the store's `calib:symbols` discovery set mapped through `symbology`, not "the 17 symbols whose sample data is present under `data/*.parquet`". Drop the parenthetical symbol inventory or restate it as illustrative. |
-| `Per-instrument return distribution` | Resolved from the store; re-point the `tick-distributions.md` citation. |
-| `Per-instrument spread distribution` | Same, for `spread-distributions.md`. |
-| `Per-instrument tick-interval distribution` | Same, for `tick-interval-distributions.md`. |
+| `Per-instrument return distribution` | Resolved from the store; replace the `tick-distributions.md` citation with one to the seeding tool (the file is deleted in this change). |
+| `Per-instrument spread distribution` | Same, replacing the `spread-distributions.md` citation. |
+| `Per-instrument tick-interval distribution` | Same, replacing the `tick-interval-distributions.md` citation. |
 | `Initial price from sample data` | Rename to sourcing from the store (a `RENAMED` block plus a `MODIFIED` body, or fold into one modified requirement — pick one and keep it consistent). |
 | `Price generation follows a calibrated biased random walk` | Its "minimum price-change unit (derived from its sample data)" clause now comes from the store. |
 
@@ -127,10 +135,10 @@ Requirement style, copied exactly from the existing deltas: `### Requirement: <S
 `- **WHEN**` / `- **THEN**` bullets with no trailing period, continuation lines indented 2 spaces.
 Relative doc links from a delta spec are five levels up (`../../../../../docs/synthetic-price.md`).
 
-Judgment call to make while writing: `data-contract`'s `Requirement: Stream and key naming` owns
-Redis key naming today but covers only `ticks.raw.*`, `bars.*` and `bar_state:*`. Either extend it
-with the `calib:*` family or state in `calibration-store`'s purpose that it owns its own keyspace.
-Pick one; don't leave key naming owned by two capabilities.
+Key-naming ownership (decided): `data-contract`'s `Requirement: Stream and key naming` covers only
+`ticks.raw.*`, `bars.*` and `bar_state:*`, and stays that way — no `data-contract` delta in this
+change. `calibration-store`'s `## Purpose` states that it owns its own keyspace (`symbology`,
+`instrument:*`, `calib:*`), so each key family has exactly one owning capability.
 
 ### `design.md`
 
@@ -154,8 +162,12 @@ itself revised an earlier decision without deleting it. Decisions to record:
    Alternative rejected: keeping the tables as a fallback — reintroduces exactly the drift
    `distributions.py`'s docstring warns about and turns a misconfigured Redis into a silent
    half-calibrated run.
-4. **The fitted tables move into the seeding tool, not out of the repo.** They remain the seed's
-   source of truth, which is what makes "no behavior change" verifiable (see Verification).
+4. **The seeding tool is the single source of truth for every seeded value.** The fitted tables,
+   instrument metadata and initial prices move into it, not out of the repo, which is what makes
+   "no behavior change" verifiable (see Verification). The three `docs/*-distributions.md` files
+   are deleted once the tool lands. Alternative rejected: keeping them as reference documentation —
+   two hand-maintained copies of the same parameters drift, and a reader cannot tell which one the
+   running system uses.
 5. **`pyarrow` stays a dependency of the seeding tool only**, not of the service.
 
 #### Open question to resolve in `design.md`
@@ -178,7 +190,10 @@ verification exist. Pre-existing code that already satisfies the "implement" cla
 the task while its "verify" clause has no coverage.
 
 Suggested sections: (1) keyspace + seeding tool, (2) Redis-backed read side, (3) wiring and
-deployment, (4) removing the file-based path.
+deployment, (4) removing the file-based path. Section 4 ends with deleting the three
+`docs/*-distributions.md` files and re-pointing every reference to them (see "Removing the
+distribution docs") — ordered last, so it only happens after the seeding tool and its no-behavior-
+change test exist.
 
 ## Step 2 — implement
 
@@ -228,6 +243,23 @@ tests are collected automatically). It owns the moved parquet code and the three
 writes the calibration-store keyspace — converting **code units → stored units** on the way in (the inverse of
 what the reader does), which is what makes the round-trip test below meaningful.
 
+It is the **only** place the seeded values are defined: fitted distributions, instrument metadata
+(`pip_size`, `quote_currency`) and initial prices. The per-symbol fit rationale that today lives
+only in the markdown files (why each family won) moves into comments next to the tables it
+explains, so deleting the docs loses no reasoning.
+
+### Removing the distribution docs
+
+Once the seeding tool and its tests land, delete `docs/tick-distributions.md`,
+`docs/spread-distributions.md` and `docs/tick-interval-distributions.md`, and re-point every
+reference to the seeding tool:
+
+- `docs/synthetic-price.md:27,37,50` — the three "described in this document" pointers.
+- `generator.py:10-14` and `calibration.py:6-7` module docstrings. (`distributions.py`'s citations
+  go with the tables and accessors that carry them.)
+- `openspec/changes/add-price-pipeline/design.md:237,256` and `tasks.md:98-100`.
+- The `synthetic-feed` spec citations, via the `MODIFIED` deltas above.
+
 ### Tests
 
 There is **no `conftest.py` anywhere in this repo** and no mock library or `fakeredis` — externals
@@ -267,11 +299,13 @@ moments vs. textbook values at `rel=0.02..0.05`) stay untouched — the samplers
    `ticks.raw.synthetic.{symbol}` for the seeded symbol set and no other. Then confirm the service
    image no longer needs the `data/` mount — start it with the mount removed.
 7. `grep -rn "pyarrow" services/feed-adapter-synthetic/` returns nothing outside tests.
+8. The three `docs/*-distributions.md` files are gone, and
+   `grep -rn "tick-distributions\|spread-distributions\|tick-interval-distributions" --exclude-dir=.git .`
+   finds nothing outside this plan.
 
 ## Not in this change
 
 - Re-deriving the fits. The seeded values are the existing tables; no new `scipy` run.
-- Touching `tick-distributions.md`, `spread-distributions.md`, `tick-interval-distributions.md`, or
-  stubbing `distributions.py`.
+- Stubbing `distributions.py`'s samplers — they stay as they are.
 - MCP gateway, read-only Redis ACL users, network isolation.
 - The other 44 open `add-price-pipeline` tasks.

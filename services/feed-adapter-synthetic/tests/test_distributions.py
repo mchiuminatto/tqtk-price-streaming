@@ -1,8 +1,8 @@
 """Verification that each hand-rolled `random.Random`-based sampler in `distributions.py` actually
 reproduces its family's known mean/variance/median - these are non-trivial statistical transforms
 (inverse-CDF, ratio-of-normals, etc.), not one-liners, so each gets checked against its textbook
-formula rather than trusted by inspection. Also checks the per-symbol tables are complete against
-the real `data/*.parquet` symbol set, so a symbol never silently lacks a distribution entry.
+formula rather than trusted by inspection. (Per-symbol completeness is the calibration store's job
+now - see `test_calibration_store.py`.)
 """
 
 from __future__ import annotations
@@ -12,9 +12,7 @@ import random
 import statistics
 
 import pytest
-from feed_adapter_synthetic import distributions
 from feed_adapter_synthetic.distributions import Distribution
-from feed_adapter_synthetic.symbols import discover_symbols
 
 _N = 200_000
 _SEED = 12345
@@ -112,29 +110,3 @@ def test_unknown_family_raises():
 
     with pytest.raises(ValueError, match="no sampler registered"):
         dist.sample(random.Random(0))
-
-
-# --- every real symbol has all three fitted distributions registered ----------------------------
-
-
-def test_every_discovered_symbol_has_all_three_distributions_registered():
-    # `registered_symbols` intersects the three tables, so a symbol fitted for only some of the
-    # quantities shows up as missing here rather than passing on a partial entry.
-    missing = sorted(set(discover_symbols()) - distributions.registered_symbols())
-
-    assert not missing, f"missing at least one fitted distribution for: {missing}"
-
-
-@pytest.mark.parametrize(
-    ("accessor", "expected_message"),
-    [
-        (distributions.return_distribution, "no fitted return distribution"),
-        (distributions.spread_distribution, "no fitted spread distribution"),
-        (distributions.interval_distribution, "no fitted tick interval distribution"),
-    ],
-)
-def test_unregistered_symbol_raises_naming_its_quantity(accessor, expected_message):
-    # The accessors own this error so every caller gets the same actionable message - which
-    # quantity is unfitted, and which doc the missing row comes from.
-    with pytest.raises(ValueError, match=expected_message):
-        accessor("NOTASYMBOL")

@@ -234,8 +234,8 @@ The decision above picked Normal for both returns and tick intervals, derived fr
 parameters as static config ("adds a build step that silently goes stale ... deriving on startup
 keeps the sample file as the only source of truth"). That assumption didn't survive contact with
 the actual sample data: fitting five candidate families per symbol by MLE and ranking them by AIC
-(`docs/tick-distributions.md` for returns, `docs/tick-interval-distributions.md` for tick
-interval) showed **every one of the 17 symbols rejects Normal decisively** — 13/17 returns series
+(recorded beside `RETURN_FITS` and `INTERVAL_FITS` in `tools/calibration_seed/tables.py`)
+showed **every one of the 17 symbols rejects Normal decisively** — 13/17 returns series
 fit Laplace better, the other 4 fit Student-t; 13/17 interval series fit Log-normal better, the
 other 4 fit Log-logistic. Model *family* selection needs comparing several MLE fits by AIC, which
 means `scipy` — a dependency this feed's runtime shouldn't carry for a question that isn't a
@@ -253,7 +253,7 @@ inventing a runtime fallback that would need `scipy` in production.
 
 **Spread is no longer a fixed constant either.** The same offline-fit exercise was run against
 spread (`Ask - Bid`), against five positive-support candidate families
-(`docs/spread-distributions.md`); every symbol rejected the implicit "spread is roughly constant"
+(recorded beside `SPREAD_FITS` in `tools/calibration_seed/tables.py`); every symbol rejected the implicit "spread is roughly constant"
 assumption too. `_DEFAULT_SPREAD` is gone: `_RandomWalk` now draws a fresh spread per tick from
 `SymbolCalibration.spread_distribution`, and `ask = bid + spread` — not `mid ± spread/2` around a
 synthetic midpoint, since there is no `mid` in this model any more: the walked series is the bid

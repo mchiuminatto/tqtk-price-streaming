@@ -18,11 +18,13 @@ __all__ = ["FeedConfig"]
 class FeedConfig(ServiceConfig):
     service_name: str = "feed-adapter-synthetic"
 
-    # Multiplier against each symbol's sample-derived mean tick interval (see design.md,
-    # "Synthetic price/tick-interval generation calibrated from sample data"): 1.0 (default)
-    # publishes at the sample's own mean cadence, >1.0 speeds it up, <1.0 slows it down. Positive:
+    # Multiplier against every interval drawn from a symbol's fitted tick-interval distribution
+    # (the synthetic-feed spec's "Configurable tick pacing"): 1.0 (default) publishes at the
+    # distribution's own timescale, >1.0 speeds it up, <1.0 slows it down. Positive:
     # a zero or negative multiplier is a misconfiguration, not a valid "publish nothing" mode -
     # stopping the adapter is a deployment action, not a config value.
     tick_rate_per_symbol: float = Field(default=1.0, gt=0)
 
+    # Both the bus ticks are published to and the calibration store they are generated from - one
+    # Redis, so one URL.
     redis_url: str = "redis://localhost:6379/0"

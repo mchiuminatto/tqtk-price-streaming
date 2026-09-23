@@ -119,8 +119,23 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  # One-shot job: seeds the calibration store (symbology, instrument metadata, fitted
+  # distributions) from tools/calibration_seed/tables.py - the only writer of that keyspace - and
+  # exits. It re-runs on every `up`, so a Redis that lost its data comes back calibrated.
+  calibration-seeder:
+    build:
+      context: ..
+      dockerfile: tools/calibration_seed/Dockerfile
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      TQTK_REDIS_URL: redis://redis:6379/0
+    # Run to completion, never restart: the adapter gates on this exiting 0.
+    restart: "no"
+
   # Configurable-rate synthetic tick generator: publishes calibrated ticks to
-  # ticks.raw.synthetic.{symbol} for the 17-symbol set under data/*.parquet (services/
+  # ticks.raw.synthetic.{symbol} for every symbol in the calibration store (services/
   # feed-adapter-synthetic). Prometheus already scrapes this job name (prometheus/prometheus.yml),
   # so it reports "up" once this is running.
   feed-adapter-synthetic:
@@ -132,16 +147,14 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      # The adapter refuses to start against an unseeded store, so it waits for the seeder to
+      # finish successfully rather than crash-looping until it does.
+      calibration-seeder:
+        condition: service_completed_successfully
     environment:
       # Compose's own DNS name for the redis service, not the config default (localhost), which
       # only resolves inside redis's own container.
       TQTK_REDIS_URL: redis://redis:6379/0
-    volumes:
-      # `discover_symbols()` walks up from its own module looking for a `data/` directory - a
-      # repository-checkout asset, never baked into the image (symbols.py's own docstring). The
-      # installed venv lives under /app, so mounting the sample data at /app/data is what lets
-      # that walk-up find it from inside the container.
-      - ../data:/app/data:ro
     healthcheck:
       # `/health` ("is this process alive"), not `/ready` ("has it reached Redis") - restart is
       # the right response to the first, not to a Redis outage this same stack's `depends_on`

@@ -87,15 +87,17 @@ async def _run_service(
             await wait_for_redis(client.ping, readiness, stop)
             if stop.is_set():
                 return
+            # One handler for every calibration failure at startup, so each leaves the same
+            # structured error line rather than only a traceback.
             try:
                 calibrations = await CalibrationStore(client).load()
+                selected = tuple(calibrations) if symbols is None else tuple(symbols)
+                uncalibrated = sorted(set(selected) - calibrations.keys())
+                if uncalibrated:
+                    raise CalibrationError(f"no calibration in the store for {uncalibrated}")
             except CalibrationError as exc:
-                _log.error("calibration load failed: %s", exc)
+                _log.error("calibration failed: %s", exc)
                 raise
-            selected = tuple(calibrations) if symbols is None else tuple(symbols)
-            uncalibrated = sorted(set(selected) - calibrations.keys())
-            if uncalibrated:
-                raise CalibrationError(f"no calibration in the store for {uncalibrated}")
             readiness.mark_connected(CALIBRATION_DEPENDENCY)
             sink: TickSink = RedisTickSink(client)
             await run_synthetic_feed(

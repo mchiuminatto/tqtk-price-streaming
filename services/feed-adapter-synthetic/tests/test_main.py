@@ -12,6 +12,7 @@ contract. `RuntimeServer` is monkeypatched to a recorder so no real socket is op
 from __future__ import annotations
 
 import asyncio
+import logging
 from decimal import Decimal
 from typing import ClassVar, Self
 
@@ -103,6 +104,15 @@ def _reset_recorder(monkeypatch):
 
 async def _noop_sleep(_seconds: float) -> None:
     pass
+
+
+def _logged_calibration_failure(caplog, fragment: str) -> bool:
+    return any(
+        record.levelno == logging.ERROR
+        and record.getMessage().startswith("calibration failed:")
+        and fragment in record.getMessage()
+        for record in caplog.records
+    )
 
 
 # --- wait_for_redis: /ready reflects the Redis connection, per task 5.2's neighbor and 5.7 -------
@@ -287,7 +297,7 @@ def test_ready_once_calibration_has_loaded(monkeypatch):
     assert readiness_at_generation == [True]
 
 
-def test_incomplete_store_publishes_no_ticks_and_raises(monkeypatch):
+def test_incomplete_store_publishes_no_ticks_and_raises(monkeypatch, caplog):
     monkeypatch.setattr(main_module, "RuntimeServer", _RecordingRuntimeServer)
     _FakeCalibrationStore.error = CalibrationError(
         "'EUR/USD': `calib:EUR/USD:spread:family` is missing"
@@ -299,7 +309,10 @@ def test_incomplete_store_publishes_no_ticks_and_raises(monkeypatch):
 
     monkeypatch.setattr(main_module, "run_synthetic_feed", fake_run_synthetic_feed)
 
-    with pytest.raises(CalibrationError, match="calib:EUR/USD:spread:family"):
+    with (
+        caplog.at_level(logging.ERROR, logger=main_module.__name__),
+        pytest.raises(CalibrationError, match="calib:EUR/USD:spread:family"),
+    ):
         asyncio.run(
             main_module._run_service(
                 FeedConfig(redis_url="redis://unused/0"),
@@ -309,13 +322,14 @@ def test_incomplete_store_publishes_no_ticks_and_raises(monkeypatch):
         )
 
     assert generated == []
+    assert _logged_calibration_failure(caplog, "calib:EUR/USD:spread:family")
     assert _RecordingRuntimeServer.instances[-1].readiness.snapshot() == {
         main_module.REDIS_DEPENDENCY: True,
         main_module.CALIBRATION_DEPENDENCY: False,
     }
 
 
-def test_requested_symbol_without_calibration_is_refused(monkeypatch):
+def test_requested_symbol_without_calibration_is_refused(monkeypatch, caplog):
     monkeypatch.setattr(main_module, "RuntimeServer", _RecordingRuntimeServer)
     generated: list[object] = []
 
@@ -324,7 +338,10 @@ def test_requested_symbol_without_calibration_is_refused(monkeypatch):
 
     monkeypatch.setattr(main_module, "run_synthetic_feed", fake_run_synthetic_feed)
 
-    with pytest.raises(CalibrationError, match="XAUUSD"):
+    with (
+        caplog.at_level(logging.ERROR, logger=main_module.__name__),
+        pytest.raises(CalibrationError, match="XAUUSD"),
+    ):
         asyncio.run(
             main_module._run_service(
                 FeedConfig(redis_url="redis://unused/0"),
@@ -336,6 +353,8 @@ def test_requested_symbol_without_calibration_is_refused(monkeypatch):
 
     assert generated == []
     assert not _RecordingRuntimeServer.instances[-1].readiness.is_ready
+    # Logged like a failed load, not left to the traceback alone.
+    assert _logged_calibration_failure(caplog, "XAUUSD")
 
 
 def test_run_service_closes_a_redis_client_it_created_itself(monkeypatch):

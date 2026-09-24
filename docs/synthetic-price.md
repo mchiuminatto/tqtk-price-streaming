@@ -24,7 +24,7 @@ $\Large t_{I_{t+1}} = D_{TI}(parameters_{TI})$
 Where:
 
 - $t_{I_{t+1}}$ Is the timestamp for the next tick for the instrument I.
-- $D_{TI}(parameters_{TI})$ Is the time interval distribution, and its parameters, for the instrument I. Consider the mapping between instrument, its distribution (and distribution parameters) described in this document: `docs/tick-interval-distributions.md`
+- $D_{TI}(parameters_{TI})$ Is the time interval distribution, and its parameters, for the instrument I. Each instrument's family and parameters are defined in the calibration seed script, `deploy/calibration/calibration.redis` (its tick-interval section), and loaded into the calibration store the adapter reads.
 
 ### Bid.
 
@@ -34,7 +34,7 @@ Where:
 
 - $bid_{I_{t+1}}$: Bid price at timestamp t+1 for instrument I
 - $bid_{I_{t}}$: Bid price at timestamp t for instrument I
-- $D_{RI}(parameters_{RI})$: Tick return's distribution, and its parameters for instrument I. Consider the mapping between instrument, its distribution (and distribution parameters) described in this document: `docs/tick-distributions.md`
+- $D_{RI}(parameters_{RI})$: Tick return's distribution, and its parameters for instrument I. Each instrument's family and parameters are defined in the calibration seed script, `deploy/calibration/calibration.redis` (its return section), and loaded into the calibration store the adapter reads.
 
 Note:
 
@@ -47,7 +47,7 @@ $Spread_{I_{t+1}} = D_{SI}(parameters_{SI})$
 Where:
 
 - $Spread_{I_{t+1}}$: Spread at timestamp t+1 for instrument I.
-- $D_{SI}(parameters_{SI})$: Spread distribution and its parameters for instrument I. Consider the mapping between instrument and its spread distribution (and its distribution parameters) described in this document. `docs/spread-distributions.md`
+- $D_{SI}(parameters_{SI})$: Spread distribution and its parameters for instrument I. Each instrument's family and parameters are defined in the calibration seed script, `deploy/calibration/calibration.redis` (its spread section), and loaded into the calibration store the adapter reads.
 
 ### Ask.
 
@@ -55,7 +55,7 @@ $Ask_{I_{t+1}} = Bid_{I{t+1}} + Spread_{I{t+1}}$
 
 ## Minimum change position.
 
-Is the decimal position where a change in one unit (pip, contract) is reflected. Use as reference the following document: `docs/minimum-change-position.md`
+Is the decimal position where a change in one unit (pip, contract) is reflected. Each instrument's value is its `pip_size`, defined in the calibration seed script, `deploy/calibration/calibration.redis`, with the method used to find it.
 
 ## Constraints
 

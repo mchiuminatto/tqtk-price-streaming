@@ -7,13 +7,13 @@ live Redis to verify which symbols were published.
 
 Per `docs/synthetic-price.md`, `_RandomWalk` follows a biased random walk calibrated per
 instrument: the next bid is `bid_t+1 = bid_t + r_t+1`, `r_t+1` drawn from that symbol's fitted
-return distribution (`docs/tick-distributions.md`) and rounded to the instrument's minimum
-price-change unit; the ask is `bid_t+1 + spread_t+1`, `spread_t+1` drawn from that symbol's fitted
-spread distribution (`docs/spread-distributions.md`) - not the fixed constant this used before
-per-symbol spread fitting existed. The wait before the next tick is drawn from that symbol's
-fitted tick-interval distribution (`docs/tick-interval-distributions.md`), scaled by the
-configured pacing multiplier. `calibration.py` assembles the `SymbolCalibration` these
-distributions live on; `distributions.py` implements sampling from each fitted family.
+return distribution and rounded to the instrument's minimum price-change unit; the ask is
+`bid_t+1 + spread_t+1`, `spread_t+1` drawn from that symbol's fitted spread distribution - not the
+fixed constant this used before per-symbol spread fitting existed. The wait before the next tick is
+drawn from that symbol's fitted tick-interval distribution, scaled by the configured pacing
+multiplier. Each symbol's `SymbolCalibration` (`calibration.py`) is loaded from the calibration
+store by the caller and passed in - the values themselves live only in the seed script
+(`deploy/calibration/calibration.redis`); `distributions.py` implements sampling from each family.
 
 Per that doc's Constraints section, every price value and every value derived directly from a
 price - the running bid, the sampled return and spread once drawn, the rounded/published bid and
@@ -33,13 +33,12 @@ import random
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from decimal import ROUND_HALF_EVEN, Decimal
-from pathlib import Path
 from typing import Protocol
 
 from tqtk_common.records import Tick
 from tqtk_common.session import FeedSession
 
-from .calibration import SymbolCalibration, compute_calibration
+from .calibration import SymbolCalibration
 
 __all__ = ["TickSink", "run_synthetic_feed"]
 
@@ -117,23 +116,6 @@ class _RandomWalk:
         return max(delta, 0.0) / self._pacing_multiplier
 
 
-async def _compute_calibrations(
-    symbols: Sequence[str], data_dir: Path | None
-) -> dict[str, SymbolCalibration]:
-    """Fit every symbol's calibration concurrently, off the event loop.
-
-    `compute_calibration` is synchronous CPU/IO-bound work - reading and vectorizing up to a
-    ~1M-row parquet file per symbol. Awaiting it 13 times in a row on the event loop would add
-    every symbol's cost to the others' serially, and stall everything else on the loop - including
-    shutdown signal handling - for the whole window. `asyncio.to_thread` moves each call to a
-    worker thread; `gather` runs them concurrently instead of one after another.
-    """
-    results = await asyncio.gather(
-        *(asyncio.to_thread(compute_calibration, symbol, data_dir) for symbol in symbols)
-    )
-    return dict(zip(symbols, results, strict=True))
-
-
 async def _run_symbol(
     symbol: str,
     *,
@@ -182,9 +164,8 @@ async def run_synthetic_feed(
     *,
     pacing_multiplier: float,
     sink: TickSink,
+    calibrations: Mapping[str, SymbolCalibration],
     session: FeedSession | None = None,
-    calibrations: Mapping[str, SymbolCalibration] | None = None,
-    data_dir: Path | None = None,
     seed: int | None = None,
     clock: Callable[[], int] = _default_clock,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -198,9 +179,8 @@ async def run_synthetic_feed(
     neither, this runs forever, which is the production shape: the adapter's entrypoint sets
     `stop` from a shutdown signal.
 
-    `calibrations` lets a caller (a test, or an entrypoint with its own caching) supply
-    pre-computed `SymbolCalibration`s; when omitted, one is computed per symbol from `data_dir`
-    (default: the repository's `data/` directory - see `calibration.compute_calibration`).
+    `calibrations` must hold a `SymbolCalibration` for every symbol in `symbols` - in production,
+    what `CalibrationStore.load` returned; in a test, whatever calibration it wants to pin.
 
     `seed`, when given, is not reused verbatim across symbols - each symbol's `_RandomWalk` is
     seeded from `seed` mixed with that symbol's name (see `_derive_symbol_seed`), so a single fixed
@@ -210,16 +190,16 @@ async def run_synthetic_feed(
     """
     if not symbols:
         raise ValueError("symbols must be non-empty: the adapter has nothing to generate")
-    resolved_calibrations = (
-        calibrations if calibrations is not None else await _compute_calibrations(symbols, data_dir)
-    )
+    uncalibrated = sorted(set(symbols) - calibrations.keys())
+    if uncalibrated:
+        raise ValueError(f"no calibration supplied for {uncalibrated}")
     session = session or FeedSession()
     stop = stop or asyncio.Event()
     await asyncio.gather(
         *(
             _run_symbol(
                 symbol,
-                calibration=resolved_calibrations[symbol],
+                calibration=calibrations[symbol],
                 pacing_multiplier=pacing_multiplier,
                 seed=seed,
                 session=session,

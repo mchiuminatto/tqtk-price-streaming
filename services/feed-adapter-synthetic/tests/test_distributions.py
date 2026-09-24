@@ -1,8 +1,8 @@
 """Verification that each hand-rolled `random.Random`-based sampler in `distributions.py` actually
 reproduces its family's known mean/variance/median - these are non-trivial statistical transforms
 (inverse-CDF, ratio-of-normals, etc.), not one-liners, so each gets checked against its textbook
-formula rather than trusted by inspection. Also checks the per-symbol tables are complete against
-the real `data/*.parquet` symbol set, so a symbol never silently lacks a distribution entry.
+formula rather than trusted by inspection. (Per-symbol completeness is the calibration store's job
+now - see `test_calibration_store.py`.)
 """
 
 from __future__ import annotations
@@ -12,9 +12,12 @@ import random
 import statistics
 
 import pytest
-from feed_adapter_synthetic import distributions
-from feed_adapter_synthetic.distributions import Distribution
-from feed_adapter_synthetic.symbols import discover_symbols
+from feed_adapter_synthetic.distributions import (
+    FAMILY_PARAMETERS,
+    SUPPORTED_FAMILIES,
+    UNBOUNDED_PARAMETERS,
+    Distribution,
+)
 
 _N = 200_000
 _SEED = 12345
@@ -114,27 +117,24 @@ def test_unknown_family_raises():
         dist.sample(random.Random(0))
 
 
-# --- every real symbol has all three fitted distributions registered ----------------------------
+# --- the parameter list each family declares --------------------------------------------------
 
 
-def test_every_discovered_symbol_has_all_three_distributions_registered():
-    # `registered_symbols` intersects the three tables, so a symbol fitted for only some of the
-    # quantities shows up as missing here rather than passing on a partial entry.
-    missing = sorted(set(discover_symbols()) - distributions.registered_symbols())
-
-    assert not missing, f"missing at least one fitted distribution for: {missing}"
+def test_every_family_declares_its_parameters():
+    assert set(FAMILY_PARAMETERS) == SUPPORTED_FAMILIES
 
 
-@pytest.mark.parametrize(
-    ("accessor", "expected_message"),
-    [
-        (distributions.return_distribution, "no fitted return distribution"),
-        (distributions.spread_distribution, "no fitted spread distribution"),
-        (distributions.interval_distribution, "no fitted tick interval distribution"),
-    ],
-)
-def test_unregistered_symbol_raises_naming_its_quantity(accessor, expected_message):
-    # The accessors own this error so every caller gets the same actionable message - which
-    # quantity is unfitted, and which doc the missing row comes from.
-    with pytest.raises(ValueError, match=expected_message):
-        accessor("NOTASYMBOL")
+@pytest.mark.parametrize("family", sorted(FAMILY_PARAMETERS))
+def test_each_sampler_takes_exactly_its_declared_parameters(family):
+    # Catches a declared list drifting from what the sampler unpacks: the load validates against
+    # the list, so the two must agree for "loads" to mean "can be sampled".
+    names = FAMILY_PARAMETERS[family]
+    Distribution(family, tuple(1.0 for _ in names)).sample(random.Random(0))
+    with pytest.raises(ValueError):
+        Distribution(family, tuple(1.0 for _ in (*names, "extra"))).sample(random.Random(0))
+
+
+def test_every_unbounded_parameter_is_one_some_family_declares():
+    # A typo here would silently leave that parameter subject to the positivity check.
+    declared = {name for names in FAMILY_PARAMETERS.values() for name in names}
+    assert UNBOUNDED_PARAMETERS <= declared

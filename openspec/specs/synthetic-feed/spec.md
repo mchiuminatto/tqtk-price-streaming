@@ -1,11 +1,13 @@
+# synthetic-feed Specification
+
 ## Purpose
 
 Generates synthetic tick data for the in-scope symbol set, conforming to the data contract, as the
 sole active data source during Phase 1 — statistically calibrated per instrument, each against its
 own fitted return, spread, and tick-interval distribution (not one fixed family for every symbol),
-per `../../../../../docs/synthetic-price.md`.
+per `../../../docs/synthetic-price.md`.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: Symbol set
 The synthetic feed SHALL generate ticks for exactly the configured symbol set — the 17 symbols
@@ -21,7 +23,7 @@ USATECHIDXUSD) — and no others.
 ### Requirement: Per-instrument return distribution
 For each configured symbol, the adapter SHALL use that symbol's own fitted return distribution —
 a family (e.g. Laplace, Student-t) plus that family's parameters, selected offline by AIC over
-several candidate families and documented per symbol in `../../../../../deploy/calibration/calibration.redis`
+several candidate families and documented per symbol in `../../../docs/tick-distributions.md`
 — rather than one fixed distribution family shared by every symbol.
 
 #### Scenario: Adapter starts
@@ -43,7 +45,7 @@ unit (derived from its sample data) before publication.
 For each configured symbol, the adapter SHALL use that symbol's own fitted spread distribution —
 a family (e.g. Weibull, Gamma, Log-logistic) plus that family's parameters, selected offline by
 AIC over several candidate positive-support families and documented per symbol in
-`../../../../../deploy/calibration/calibration.redis` — to draw a fresh spread for every tick, rather than
+`../../../docs/spread-distributions.md` — to draw a fresh spread for every tick, rather than
 publishing a single fixed spread constant for every symbol and every tick.
 
 #### Scenario: A tick is generated
@@ -54,7 +56,7 @@ publishing a single fixed spread constant for every symbol and every tick.
 ### Requirement: Decimal-precision price arithmetic
 Every price value and every value derived directly from a price (a return, a spread, the running
 walk state, the rounded bid/ask) SHALL be represented as `Decimal`, never `float`, throughout
-price calculation, per `../../../../../docs/synthetic-price.md`. A distribution's own fitted
+price calculation, per `../../../docs/synthetic-price.md`. A distribution's own fitted
 parameters remain `float` — the sampler is float-only — but a sampled return or spread SHALL be
 converted to `Decimal` before being combined with a price. The tick's bid/ask are cast to `float`
 only at publication, to satisfy the `Tick` wire contract's `Price` type; no `float` price
@@ -76,7 +78,7 @@ Each symbol's first generated price (`p_0`) SHALL be sourced from that symbol's 
 For each configured symbol, the adapter SHALL use that symbol's own fitted tick-interval
 distribution — a family (e.g. Log-normal, Log-logistic) plus that family's parameters, selected
 offline by AIC over several candidate positive-support families and documented per symbol in
-`../../../../../deploy/calibration/calibration.redis` — rather than one fixed distribution family
+`../../../docs/tick-interval-distributions.md` — rather than one fixed distribution family
 shared by every symbol.
 
 #### Scenario: Adapter starts

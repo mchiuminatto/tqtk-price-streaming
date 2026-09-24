@@ -119,8 +119,27 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  # One-shot job: applies the calibration seed script (symbology, instrument metadata, fitted
+  # distributions - the only writer of that keyspace) with redis-cli, then exits. It re-runs on
+  # every `up`, so a Redis that lost its data comes back calibrated. The stock Redis image, for its
+  # redis-cli: the script is data, mounted in, not baked into any image.
+  calibration-seeder:
+    image: redis:7.4-alpine
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./calibration/calibration.redis:/seed/calibration.redis:ro
+      - ./calibration/seed.sh:/seed/seed.sh:ro
+    # Dry-runs the script on scratch DB 15, then applies it to DB 0 only if that run was clean -
+    # see seed.sh for why MULTI/EXEC alone is not enough. Kept in its own file, not inline here,
+    # so its integration test runs exactly this script.
+    entrypoint: ["sh", "/seed/seed.sh"]
+    # Run to completion, never restart: the adapter gates on this exiting 0.
+    restart: "no"
+
   # Configurable-rate synthetic tick generator: publishes calibrated ticks to
-  # ticks.raw.synthetic.{symbol} for the 17-symbol set under data/*.parquet (services/
+  # ticks.raw.synthetic.{symbol} for every symbol in the calibration store (services/
   # feed-adapter-synthetic). Prometheus already scrapes this job name (prometheus/prometheus.yml),
   # so it reports "up" once this is running.
   feed-adapter-synthetic:
@@ -132,16 +151,14 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      # The adapter refuses to start against an unseeded store, so it waits for the seeder to
+      # finish successfully rather than crash-looping until it does.
+      calibration-seeder:
+        condition: service_completed_successfully
     environment:
       # Compose's own DNS name for the redis service, not the config default (localhost), which
       # only resolves inside redis's own container.
       TQTK_REDIS_URL: redis://redis:6379/0
-    volumes:
-      # `discover_symbols()` walks up from its own module looking for a `data/` directory - a
-      # repository-checkout asset, never baked into the image (symbols.py's own docstring). The
-      # installed venv lives under /app, so mounting the sample data at /app/data is what lets
-      # that walk-up find it from inside the container.
-      - ../data:/app/data:ro
     healthcheck:
       # `/health` ("is this process alive"), not `/ready` ("has it reached Redis") - restart is
       # the right response to the first, not to a Redis outage this same stack's `depends_on`

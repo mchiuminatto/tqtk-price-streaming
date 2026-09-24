@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
 #
 # streaming-gateway-svc
 # WebSocket relay of live ticks and bars to LAN consumers, plus the bootstrap snapshot endpoint.
@@ -12,18 +12,21 @@
 # uv.lock. Only this service's source and `libs/tqtk-common` are copied in, so
 # an unrelated service's change does not invalidate this image's layers.
 
-ARG PYTHON_VERSION=3.12
-ARG UV_VERSION=0.12.10
+# Base images are pinned by tag AND multi-arch index digest, so a re-pushed tag
+# cannot silently change what gets built. Bump both together, e.g.:
+#     docker buildx imagetools inspect python:3.12-slim-bookworm
+ARG PYTHON_IMAGE=python:3.12-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e
+ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.12.10@sha256:2bb3ebca0a796a155094a27773d290c4b074572e6107f171d88d086682fd2500
 
 # uv ships as its own image. It has to be pinned as a named stage rather than
-# an inline `COPY --from=ghcr.io/astral-sh/uv:${UV_VERSION}`: a build arg is
-# expanded in a FROM, but NOT in a COPY --from image reference.
-FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
+# an inline `COPY --from=${UV_IMAGE}`: a build arg is expanded in a FROM, but
+# NOT in a COPY --from image reference.
+FROM ${UV_IMAGE} AS uv
 
 # --------------------------------------------------------------------------
 # builder — resolve and install into a self-contained /app/.venv
 # --------------------------------------------------------------------------
-FROM python:${PYTHON_VERSION}-slim-bookworm AS builder
+FROM ${PYTHON_IMAGE} AS builder
 
 COPY --from=uv /uv /uvx /bin/
 
@@ -59,7 +62,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # --------------------------------------------------------------------------
 # Identical base to the builder: the venv's interpreter is a symlink into the
 # image's own Python, so the two stages must agree on it.
-FROM python:${PYTHON_VERSION}-slim-bookworm AS runtime
+FROM ${PYTHON_IMAGE} AS runtime
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \

@@ -14,7 +14,7 @@ services:
   # shared platform dependency whose outage stalls the whole pipeline. Durability configuration
   # (AOF `everysec` + RDB) lives in redis/redis.conf.
   redis:
-    image: redis:7.4-alpine
+    image: redis:7.4-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
     command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
     volumes:
       - ./redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
@@ -50,7 +50,7 @@ services:
   # postgres/initdb/001-timescaledb.sql. Image pinned to the version the storage-contract tests
   # already build against (libs/tqtk-common/tests/test_storage_fixture.py).
   postgres:
-    image: timescale/timescaledb:2.17.2-pg16
+    image: timescale/timescaledb:2.17.2-pg16@sha256:4e459e217f00cbb09920c34d245501e63427e6767a495de57ce76823ff280f12
     # TimescaleDB's background worker otherwise reports usage to telemetry.timescale.com on a
     # timer. Nothing in the pipeline needs it, and a private price feed should not be making
     # outbound calls nobody asked for.
@@ -97,7 +97,7 @@ services:
   # prometheus/prometheus.yml for the targets and why each service gets its own job. Until a
   # service is built and in this file, its target reports down, which is the honest answer.
   prometheus:
-    image: prom/prometheus:v3.1.0
+    image: prom/prometheus:v3.1.0@sha256:6559acbd5d770b15bb3c954629ce190ac3cbbdb2b7f1c30f0385c4e05104e218
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
@@ -124,7 +124,7 @@ services:
   # every `up`, so a Redis that lost its data comes back calibrated. The stock Redis image, for its
   # redis-cli: the script is data, mounted in, not baked into any image.
   calibration-seeder:
-    image: redis:7.4-alpine
+    image: redis:7.4-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
     depends_on:
       redis:
         condition: service_healthy
@@ -179,7 +179,7 @@ services:
   # Dashboards and alerting over the Prometheus data. Datasource and (from task 12.2) dashboards
   # are provisioned from files, so a clean bring-up needs no clicking to reproduce.
   grafana:
-    image: grafana/grafana:11.4.0
+    image: grafana/grafana:11.4.0@sha256:d8ea37798ccc41061a62ab080f2676dda6bf7815558499f901bdb0f533a456fb
     depends_on:
       prometheus:
         condition: service_healthy

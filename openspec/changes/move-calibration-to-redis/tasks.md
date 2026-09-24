@@ -42,7 +42,13 @@ Superseded by section 6: the Python tool built here was replaced by a Redis comm
       `symbology`, a missing `instrument:<venue>` field, a missing quantity in `calib:quantities`,
       a missing `family`, `param_count` disagreeing with the `param:<n>` hashes present, a
       parameter missing `name`/`value`/`unit`, an unknown `unit`, or a family absent from
-      `_SAMPLERS` each raise an error naming the symbol and key; verify one test per condition.
+      `_SAMPLERS` each raise an error naming the symbol and key - and so does anything the
+      generator could not draw from (added in the PR #12 review): a `param_count` other than the
+      family's own (`distributions.FAMILY_PARAMETERS`), a parameter named out of the family's
+      order, a scale or shape parameter not positive as the `float` the sampler receives, a value
+      out of float range, a `pip_size` that is not a power of ten as stored, a non-positive
+      `initial_price`, or a value that is not UTF-8; verify one test per condition, plus that
+      generated prices stay on the `pip_size` grid for every accepted `pip_size` form.
 - [x] 2.3 Add the round-trip test in the tool's suite: seed into the fake, load through
       `CalibrationStore`, and assert the result equals the tool's expected `SymbolCalibration`s
       for all 17 symbols with exact `==`; add a discrimination test proving a `dimensionless`
@@ -134,3 +140,9 @@ Superseded by section 6: the Python tool built here was replaced by a Redis comm
 - [x] 6.7 On a throwaway Redis on an isolated network, apply a copy of the script with one
       malformed command; verify the seeder exits non-zero, no calibration key exists, and the
       adapter started against it exits stating the store is not seeded.
+- [x] 6.8 Dry-run the seed on scratch DB 15 before applying it to DB 0 (a command failing inside
+      `EXEC` does not roll back the leading delete), with the seeder's shell moved into
+      `deploy/calibration/seed.sh`; verify with the `integration` test
+      `tests/test_calibration_seeder.py` that a clean script seeds and leaves DB 15 empty, that a
+      command failing inside `EXEC` and one rejected while queueing each fail the seeder with the
+      previous seeding intact, and that an unreachable Redis fails it.

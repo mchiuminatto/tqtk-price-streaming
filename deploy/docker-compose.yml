@@ -130,42 +130,11 @@ services:
         condition: service_healthy
     volumes:
       - ./calibration/calibration.redis:/seed/calibration.redis:ro
-    # redis-cli does not understand comments, so comment and blank lines are stripped first. With
-    # commands piped on stdin redis-cli exits 0 even on an error reply or a refused connection (its
-    # `-e` flag only covers commands given as arguments), so: a `-e PING` first fails fast if Redis
-    # is unreachable, and each piped run's output is checked - with --no-raw every error reply is
-    # marked `(error)`, and any one fails the seed, so the adapter never starts on it.
-    #
-    # MULTI/EXEC only discards everything for an error caught while queueing (EXECABORT); a command
-    # that fails while EXEC runs (an HSET with an odd field/value count, a WRONGTYPE) does not roll
-    # back the rest, so the script's leading delete would still wipe the previous seeding. So the
-    # script is dry-run first against DB 15, a scratch database reserved for this, and applied to
-    # the live DB 0 only if that run had no error. The script only touches its own keyspace, which
-    # its first command empties, so the dry run meets exactly the state the live run will.
-    # (`$$` is Compose's escape for a literal `$`.)
-    entrypoint:
-      - sh
-      - -c
-      - |
-        set -eo pipefail
-        redis-cli -h redis -e PING > /dev/null
-        commands=$$(grep -Ev '^[[:space:]]*(#|$$)' /seed/calibration.redis)
-        seed() { printf '%s\n' "$$commands" | redis-cli -h redis -n "$$1" --no-raw; }
-        report() { printf '%s\n' "$$1" | grep '(error)' >&2; }
-        dry=$$(seed 15)
-        redis-cli -h redis -n 15 FLUSHDB > /dev/null
-        if printf '%s\n' "$$dry" | grep -q '(error)'; then
-          report "$$dry"
-          echo "calibration seed failed its dry run; the store keeps its previous seeding" >&2
-          exit 1
-        fi
-        out=$$(seed 0)
-        if printf '%s\n' "$$out" | grep -q '(error)'; then
-          report "$$out"
-          echo "calibration seed failed on the live store after a clean dry run; it may be partly seeded - re-run the seeder" >&2
-          exit 1
-        fi
-        echo "calibration seeded"
+      - ./calibration/seed.sh:/seed/seed.sh:ro
+    # Dry-runs the script on scratch DB 15, then applies it to DB 0 only if that run was clean -
+    # see seed.sh for why MULTI/EXEC alone is not enough. Kept in its own file, not inline here,
+    # so its integration test runs exactly this script.
+    entrypoint: ["sh", "/seed/seed.sh"]
     # Run to completion, never restart: the adapter gates on this exiting 0.
     restart: "no"
 

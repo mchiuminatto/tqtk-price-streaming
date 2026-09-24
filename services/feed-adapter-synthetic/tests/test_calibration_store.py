@@ -10,6 +10,7 @@ section parses the real file the `calibration-seeder` container applies.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import shlex
 from decimal import Decimal
 from pathlib import Path
@@ -18,6 +19,7 @@ from typing import Any, Self
 import pytest
 from feed_adapter_synthetic.calibration_store import CalibrationError, CalibrationStore
 from feed_adapter_synthetic.distributions import Distribution
+from feed_adapter_synthetic.generator import _RandomWalk
 
 
 class _FakePipeline:
@@ -145,6 +147,27 @@ def test_price_increment_keeps_the_stored_exponent() -> None:
     assert calibration.price_increment.as_tuple().exponent == -5
 
 
+@pytest.mark.parametrize(("pip_size", "initial_price"), [("0.00001", "1.15922"), ("1E+1", "7680")])
+def test_generated_prices_stay_on_the_pip_size_grid(pip_size: str, initial_price: str) -> None:
+    # The property the power-of-ten check exists for, end to end: whatever `load` accepts, the
+    # walk's bids and asks are exact multiples of `pip_size`. The return draw is widened so each
+    # step moves several grid points and an off-grid rounding would show.
+    keyspace = _keyspace()
+    keyspace["instrument:EUR/USD"].update(pip_size=pip_size, initial_price=initial_price)
+    calibration = _load(keyspace)["EURUSD"]
+    step = float(Decimal(pip_size)) * 3
+    calibration = dataclasses.replace(
+        calibration, return_distribution=Distribution("normal", (0.0, step))
+    )
+    walk = _RandomWalk(calibration, pacing_multiplier=1.0, seed=7)
+
+    grid = Decimal(pip_size)
+    for _ in range(200):
+        bid, ask = walk.next_quote()
+        assert bid % grid == 0, bid
+        assert ask % grid == 0, ask
+
+
 def test_load_is_keyed_by_file_symbol_in_sorted_order() -> None:
     assert list(_load(_keyspace(3))) == ["EURUSD", "X1USD", "X2USD"]
 
@@ -216,7 +239,7 @@ def test_non_positive_pip_size() -> None:
     _assert_rejected(keyspace, "'EUR/USD'", "'pip_size' must be a positive power of ten")
 
 
-@pytest.mark.parametrize("pip_size", ["0.25", "0.0005", "3"])
+@pytest.mark.parametrize("pip_size", ["0.25", "0.0005", "3", "0.00010", "10"])
 def test_pip_size_that_is_not_a_power_of_ten(pip_size: str) -> None:
     # The generator rounds by quantizing to pip_size's exponent - exact only for a power of ten.
     keyspace = _keyspace()
@@ -224,7 +247,7 @@ def test_pip_size_that_is_not_a_power_of_ten(pip_size: str) -> None:
     _assert_rejected(keyspace, "'EUR/USD'", "'pip_size' must be a positive power of ten")
 
 
-@pytest.mark.parametrize("pip_size", ["1", "10", "0.01", "0.00001", "1E-5"])
+@pytest.mark.parametrize("pip_size", ["1", "1E+1", "0.01", "0.00001", "1E-5"])
 def test_pip_size_that_is_a_power_of_ten(pip_size: str) -> None:
     keyspace = _keyspace()
     keyspace["instrument:EUR/USD"]["pip_size"] = pip_size
@@ -311,6 +334,20 @@ def test_non_positive_scale_or_shape_parameter(key: str, name: str, value: str) 
     keyspace = _keyspace()
     keyspace[key]["value"] = value
     _assert_rejected(keyspace, "'EUR/USD'", key, f"({name!r}) must be positive")
+
+
+@pytest.mark.parametrize(
+    ("value", "fragment"),
+    [
+        # Positive as a decimal, but 0.0 as a float - Laplace would divide by it at the first draw.
+        ("1E-400", "must be positive in code units"),
+        ("1E+400", "out of float range"),
+    ],
+)
+def test_parameter_checked_as_the_float_the_sampler_receives(value: str, fragment: str) -> None:
+    keyspace = _keyspace()
+    keyspace["calib:EUR/USD:return:param:1"]["value"] = value
+    _assert_rejected(keyspace, "'EUR/USD'", "calib:EUR/USD:return:param:1", fragment)
 
 
 def test_negative_loc_is_accepted() -> None:

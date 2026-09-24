@@ -28,6 +28,7 @@ symbols there are.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from decimal import Decimal, InvalidOperation
 from types import TracebackType
@@ -105,8 +106,9 @@ def _decimal(text: str, *, key: str, field: str) -> Decimal:
 
 
 def _is_power_of_ten(value: Decimal) -> bool:
-    # `normalize` strips trailing zeros, so a power of ten is left with the single digit 1.
-    return value > 0 and value.normalize().as_tuple().digits == (1,)
+    # As stored, not normalized: `0.00010` is numerically 1E-4 but carries exponent -5, and the
+    # exponent is what `_RandomWalk` quantizes to - so only a lone significant digit 1 qualifies.
+    return value > 0 and value.as_tuple().digits == (1,)
 
 
 def _to_code_units(value: Decimal, unit: str, pip_size: Decimal) -> float:
@@ -128,7 +130,8 @@ def _parse_instrument(
             raise CalibrationError(f"{venue!r}: `{key}` has no {field!r} field")
     pip_size = _decimal(instrument["pip_size"], key=key, field="pip_size")
     # `generator._RandomWalk` rounds prices by quantizing to `pip_size`'s exponent, which is an
-    # exact rounding to multiples of it only when it is a power of ten.
+    # exact rounding to multiples of it only when it is a power of ten written with no trailing
+    # zeros.
     if not _is_power_of_ten(pip_size):
         raise CalibrationError(
             f"{venue!r}: `{key}` field 'pip_size' must be a positive power of ten, "
@@ -189,19 +192,15 @@ class CalibrationStore:
         """
         venues, symbology = await self._discover()
         instruments, fit_heads = await self._read_heads(venues)
-        params = await self._read_params(venues, fit_heads)
+        params = await self._read_params(
+            venues, fit_heads, {venue: pip_size for venue, (pip_size, _) in instruments.items()}
+        )
 
         calibrations: dict[str, SymbolCalibration] = {}
         for venue in venues:
             pip_size, initial_price = instruments[venue]
             distributions = {
-                quantity: Distribution(
-                    fit_heads[venue, quantity][0],
-                    tuple(
-                        _to_code_units(value, unit, pip_size)
-                        for value, unit in params[venue, quantity]
-                    ),
-                )
+                quantity: Distribution(fit_heads[venue, quantity][0], params[venue, quantity])
                 for quantity in QUANTITIES
             }
             calibrations[symbology[venue]] = SymbolCalibration(
@@ -268,11 +267,14 @@ class CalibrationStore:
         return instruments, heads
 
     async def _read_params(
-        self, venues: list[str], heads: Mapping[tuple[str, str], tuple[str, int]]
-    ) -> dict[tuple[str, str], list[tuple[Decimal, str]]]:
+        self,
+        venues: list[str],
+        heads: Mapping[tuple[str, str], tuple[str, int]],
+        pip_sizes: Mapping[str, Decimal],
+    ) -> dict[tuple[str, str], tuple[float, ...]]:
         """Round trip 3: every parameter hash, plus the one past `param_count`, which must be
         absent - so a hash left over beyond the family's parameters is caught as well as a missing
-        one."""
+        one. Returns each distribution's parameters in code units."""
         async with self._redis.pipeline(transaction=False) as pipe:
             for venue in venues:
                 for quantity in QUANTITIES:
@@ -281,12 +283,12 @@ class CalibrationStore:
                         pipe.hgetall(f"calib:{venue}:{quantity}:param:{n}")
             replies = iter(await pipe.execute())
 
-        params: dict[tuple[str, str], list[tuple[Decimal, str]]] = {}
+        params: dict[tuple[str, str], tuple[float, ...]] = {}
         for venue in venues:
             for quantity in QUANTITIES:
                 family, count = heads[venue, quantity]
                 prefix = f"calib:{venue}:{quantity}"
-                values: list[tuple[Decimal, str]] = []
+                values: list[float] = []
                 for n, expected_name in enumerate(FAMILY_PARAMETERS[family]):
                     key = f"{prefix}:param:{n}"
                     param = _decode_hash(next(replies), key=key)
@@ -308,17 +310,26 @@ class CalibrationStore:
                             f"{venue!r}: `{key}` has unknown unit {unit!r} "
                             f"(expected one of {sorted(_UNITS)})"
                         )
-                    value = _decimal(param["value"], key=key, field="value")
+                    value = _to_code_units(
+                        _decimal(param["value"], key=key, field="value"), unit, pip_sizes[venue]
+                    )
+                    # Checked as the `float` the sampler receives, not the stored decimal: a
+                    # decimal too small or too large for a float would pass as `0.0` or `inf`.
+                    if not math.isfinite(value):
+                        raise CalibrationError(
+                            f"{venue!r}: `{key}` value {param['value']!r} is out of float range "
+                            f"in code units"
+                        )
                     if expected_name not in UNBOUNDED_PARAMETERS and value <= 0:
                         raise CalibrationError(
-                            f"{venue!r}: `{key}` ({expected_name!r}) must be positive, "
-                            f"not {param['value']!r}"
+                            f"{venue!r}: `{key}` ({expected_name!r}) must be positive in code "
+                            f"units, not {param['value']!r}"
                         )
-                    values.append((value, unit))
+                    values.append(value)
                 if _decode_hash(next(replies), key=f"{prefix}:param:{count}"):
                     raise CalibrationError(
                         f"{venue!r}: `{prefix}:param_count` is {count} but "
                         f"`{prefix}:param:{count}` exists"
                     )
-                params[venue, quantity] = values
+                params[venue, quantity] = tuple(values)
         return params

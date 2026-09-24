@@ -183,14 +183,15 @@ readable, and exposes half-written state mid-run. **Alternative rejected**: `red
 
 ### The seeder is the stock Redis image, run as a one-shot Compose service
 Compose runs `calibration-seeder` from `redis:7.4-alpine` — the image the stack's Redis already
-uses — with the script bind-mounted read-only. Its entrypoint strips comment and blank lines
-(`redis-cli` does not understand comments) and pipes the rest to `redis-cli -h redis --no-raw`.
-Because piped `redis-cli` exits 0 regardless, the entrypoint checks instead: a `redis-cli -e PING`
+uses — with the script and its runner, `deploy/calibration/seed.sh`, bind-mounted read-only; the
+entrypoint only runs `seed.sh`, kept as a file rather than inline YAML so its integration test
+runs exactly what Compose does. It strips comment and blank lines (`redis-cli` does not understand
+comments) and pipes the rest to `redis-cli -h redis --no-raw`. Because piped `redis-cli` exits 0
+regardless, `seed.sh` checks instead: a `redis-cli -e PING`
 first fails fast on an unreachable Redis, and any `(error)` in a piped run's output - `EXECABORT`
 from a command rejected while queueing, or an error inside `EXEC` - fails the seed: the dry run's
 before the live store is touched, the live run's (which a clean dry run should make impossible)
-after. It has `restart: "no"` and waits
-for Redis to be healthy, and `feed-adapter-synthetic` depends on it with
+after. It has `restart: "no"` and waits for Redis to be healthy, and `feed-adapter-synthetic` depends on it with
 `condition: service_completed_successfully`. It is a container separate from the adapter, and not a
 `services/*` member: the `service-runtime` capability would require runtime endpoints a
 run-to-completion job has no use for.
@@ -201,6 +202,11 @@ the only program needed, and the data stays a mounted file rather than an image 
 puts seed data inside the service that must not own it.
 
 ### Test layout
+- The service's `tests/test_calibration_seeder.py` (marked `integration`; starts a Redis container
+  and skips without Docker) runs `seed.sh` in the stock image against a real Redis: a clean script
+  seeds DB 0 and leaves DB 15 empty, a command failing inside `EXEC` and one rejected while
+  queueing each fail the seeder with a planted key and the previous seeding intact, and an
+  unreachable Redis fails it.
 - The service's `tests/test_calibration_store.py` covers the reader with a fake serving a prebuilt
   keyspace dictionary, and also parses the committed seed script the way the seeder feeds it to
   `redis-cli` (comments and blank lines stripped, each line split like a shell): it checks the

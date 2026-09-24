@@ -175,7 +175,8 @@ not roll back the others, so the leading delete would still wipe the previous se
 therefore dry-runs the script against DB 15, a scratch logical database reserved for it, flushes
 that database, and applies the script to the live DB 0 only if the dry run had no error. The dry
 run is faithful because the script writes only inside its own keyspace, which its first command
-empties: it meets exactly the state the live run will.
+empties: it meets exactly the state the live run will. That rule is checked, not assumed: a
+seed-script test fails if any key the script writes falls outside the delete's patterns.
 
 **Alternative rejected**: overwrite in place — leaves a removed instrument's keys behind, still
 readable, and exposes half-written state mid-run. **Alternative rejected**: `redis-cli --scan` then

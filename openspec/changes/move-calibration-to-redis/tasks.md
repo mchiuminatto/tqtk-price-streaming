@@ -145,4 +145,7 @@ Superseded by section 6: the Python tool built here was replaced by a Redis comm
       `deploy/calibration/seed.sh`; verify with the `integration` test
       `tests/test_calibration_seeder.py` that a clean script seeds and leaves DB 15 empty, that a
       command failing inside `EXEC` and one rejected while queueing each fail the seeder with the
-      previous seeding intact, and that an unreachable Redis fails it.
+      previous seeding intact, and that an unreachable Redis fails it; and, since the dry run is
+      only faithful if the script writes nothing its leading delete misses, verify with
+      `test_seed_script_writes_only_keys_its_leading_delete_covers` that every key it writes
+      matches `calib:*`, `instrument:*` or `symbology`.

@@ -36,8 +36,8 @@ known-first-party = ["tqtk_common"]
 [tool.pytest.ini_options]
 testpaths = ["contracts", "libs", "services", "tools"]
 # Tests needing a real database - PostgreSQL/TimescaleDB or Redis - which start a container and
-# skip without Docker. Deselect with `-m "not integration"`; CI runs them once task 4.2 brings the
-# Compose stack.
+# skip without Docker. Deselect with `-m "not integration"`. CI's per-member jobs run them, on the
+# runner's Docker; only the `contracts` step deselects them.
 markers = ["integration: starts a PostgreSQL/TimescaleDB or Redis container; needs Docker"]
 # `tools` is not an installed package, so the repo root has to be importable
 # for `from tools.ci.affected_members import ...` to resolve.

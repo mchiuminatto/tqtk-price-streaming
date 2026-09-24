@@ -14,7 +14,9 @@
 # the rest, so the script's leading delete would still wipe the previous seeding. So the script is
 # dry-run first against SCRATCH_DB, a database reserved for this, and applied to LIVE_DB only if
 # that run had no error. The script only touches its own keyspace, which its first command
-# empties, so the dry run meets exactly the state the live run will.
+# empties, so the dry run meets exactly the state the live run will - a rule enforced by
+# `test_seed_script_writes_only_keys_its_leading_delete_covers` (feed-adapter-synthetic's
+# tests/test_calibration_store.py).
 #
 # Overridable for tests: SEED_REDIS_HOST (default `redis`, Compose's service name) and SEED_SCRIPT.
 

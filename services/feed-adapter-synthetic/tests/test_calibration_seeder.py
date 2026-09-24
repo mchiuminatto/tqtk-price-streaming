@@ -31,8 +31,18 @@ _EURUSD_LINE = "HSET instrument:EUR/USD pip_size 0.00001 quote_currency USD init
 _QUANTITIES_LINE = "SADD calib:quantities return spread interval"
 
 
-def _docker(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["docker", *args], capture_output=True, text=True, check=check)
+# Generous: `docker run` may pull the image first. A stuck daemon then fails the test instead of
+# hanging the CI job until its own time limit.
+_DOCKER_TIMEOUT_SECONDS = 120
+_DOCKER_INFO_TIMEOUT_SECONDS = 15
+
+
+def _docker(
+    *args: str, check: bool = True, timeout: float = _DOCKER_TIMEOUT_SECONDS
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["docker", *args], capture_output=True, text=True, check=check, timeout=timeout
+    )
 
 
 class _Redis:
@@ -61,9 +71,12 @@ class _Redis:
 def redis() -> Iterator[_Redis]:
     # Checked here rather than in a `skipif`, so collecting the suite never shells out to Docker.
     try:
-        if _docker("info", check=False).returncode != 0:
-            pytest.skip("docker is not available")
-    except OSError:
+        available = (
+            _docker("info", check=False, timeout=_DOCKER_INFO_TIMEOUT_SECONDS).returncode == 0
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        available = False
+    if not available:
         pytest.skip("docker is not available")
 
     suffix = uuid.uuid4().hex[:8]

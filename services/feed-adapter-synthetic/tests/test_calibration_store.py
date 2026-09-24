@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import fnmatch
 import shlex
 from decimal import Decimal
 from pathlib import Path
@@ -428,6 +429,19 @@ def test_seed_script_is_one_transaction_that_first_deletes_the_previous_seeding(
     assert commands[1][2:] == ["0", *_DELETE_PREVIOUS_SEEDING]
     assert commands[-1] == ["EXEC"]
     assert {command for command, *_ in commands[2:-1]} <= {"SET", "HSET", "SADD"}
+
+
+def test_seed_script_writes_only_keys_its_leading_delete_covers() -> None:
+    # `seed.sh`'s dry run on an empty scratch DB is only faithful to the live run if every key the
+    # script writes is one its first command deletes: a key outside that set exists live but not
+    # in scratch, so the dry run passes and the live run fails after the delete (WRONGTYPE) - or,
+    # with SET, silently overwrites the live key, a tick stream included.
+    outside = [
+        (command, key)
+        for command, key, *_ in _seed_commands()[2:-1]
+        if not any(fnmatch.fnmatchcase(key, pattern) for pattern in _DELETE_PREVIOUS_SEEDING)
+    ]
+    assert not outside, f"writes outside {_DELETE_PREVIOUS_SEEDING}: {outside}"
 
 
 def test_seed_script_loads_every_symbol() -> None:

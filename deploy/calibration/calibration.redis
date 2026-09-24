@@ -1,11 +1,9 @@
 # Calibration store seed - every value the synthetic feed is calibrated with, and the only place
-# those values are defined. Applied by the `calibration-seeder` Compose service:
-#
-#     grep -Ev '^[[:space:]]*(#|$)' calibration.redis | redis-cli -h redis --no-raw
-#
-# redis-cli does not understand comments, so comment and blank lines are stripped first. The seeder
-# fails if any reply is an `(error)` (redis-cli's own `-e` does not apply to piped commands), so the
-# adapter (which waits for the seeder to succeed) never starts on a failed seed.
+# those values are defined. Applied by `seed.sh` (beside this file), which the `calibration-seeder`
+# Compose service runs: it strips comment and blank lines (redis-cli does not understand comments),
+# dry-runs the rest with redis-cli against scratch DB 15, then applies it to the live DB 0 only if
+# that run had no error. It fails on any `(error)` reply, so the adapter (which waits for the
+# seeder to succeed) never starts on a failed seed.
 #
 # The whole file is one MULTI/EXEC transaction. Its first queued command deletes every existing
 # calibration key, so a reader sees either the previous seeding or this one - never a mix - and an

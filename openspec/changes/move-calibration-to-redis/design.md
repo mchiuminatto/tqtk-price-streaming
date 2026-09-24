@@ -166,8 +166,16 @@ symbols, growing linearly.
 The script is one `MULTI`/`EXEC` transaction whose first queued command is an `EVAL` that deletes
 every key matching `calib:*`, `instrument:*` and `symbology`; the writes follow. A concurrent
 reader sees either the previous seeding or the new one, never a mix, and an instrument removed
-from the script disappears from the store. A malformed command aborts the whole transaction
-(`EXECABORT`), leaving the store as it was.
+from the script disappears from the store.
+
+`MULTI`/`EXEC` alone does not keep a broken script from damaging the store: a command rejected
+while queueing (unknown command, too few arguments) aborts the whole transaction (`EXECABORT`),
+but one that fails while `EXEC` runs - an `HSET` with an odd field/value count, a `WRONGTYPE` - does
+not roll back the others, so the leading delete would still wipe the previous seeding. The seeder
+therefore dry-runs the script against DB 15, a scratch logical database reserved for it, flushes
+that database, and applies the script to the live DB 0 only if the dry run had no error. The dry
+run is faithful because the script writes only inside its own keyspace, which its first command
+empties: it meets exactly the state the live run will.
 
 **Alternative rejected**: overwrite in place — leaves a removed instrument's keys behind, still
 readable, and exposes half-written state mid-run. **Alternative rejected**: `redis-cli --scan` then
@@ -178,8 +186,10 @@ Compose runs `calibration-seeder` from `redis:7.4-alpine` — the image the stac
 uses — with the script bind-mounted read-only. Its entrypoint strips comment and blank lines
 (`redis-cli` does not understand comments) and pipes the rest to `redis-cli -h redis --no-raw`.
 Because piped `redis-cli` exits 0 regardless, the entrypoint checks instead: a `redis-cli -e PING`
-first fails fast on an unreachable Redis, and any `(error)` in the piped run's output - `EXECABORT`
-from a malformed script, or an error inside `EXEC` - fails the seed. It has `restart: "no"` and waits
+first fails fast on an unreachable Redis, and any `(error)` in a piped run's output - `EXECABORT`
+from a command rejected while queueing, or an error inside `EXEC` - fails the seed: the dry run's
+before the live store is touched, the live run's (which a clean dry run should make impossible)
+after. It has `restart: "no"` and waits
 for Redis to be healthy, and `feed-adapter-synthetic` depends on it with
 `condition: service_completed_successfully`. It is a container separate from the adapter, and not a
 `services/*` member: the `service-runtime` capability would require runtime endpoints a
@@ -196,7 +206,8 @@ puts seed data inside the service that must not own it.
   `redis-cli` (comments and blank lines stripped, each line split like a shell): it checks the
   file is one transaction that first deletes the previous seeding and otherwise only writes, that
   the resulting keyspace loads cleanly for all 17 symbols (the loader's validation is the
-  completeness check), that every `loc`/`scale` carries its quantity's unit and every other
+  completeness check - it checks each family's parameter count, names and positive
+  scales/shapes, not just that keys exist), that every `loc`/`scale` carries its quantity's unit and every other
   parameter is `dimensionless`, and that numbers are plain decimals.
 - `_run_service` tests inject a fake `CalibrationStore`, as they already inject `RuntimeServer`.
 - `tests/test_symbols.py` and the parquet cases in `tests/test_calibration.py` are deleted with the
@@ -223,8 +234,9 @@ then on the seed-script tests keep the script loadable and correctly tagged.
   worse.
 - [Redis loses the keyspace on restart] → Redis runs with AOF `everysec` and RDB
   (`platform-resilience`), and the seeder re-runs on every `docker compose up`.
-- [A hand edit to the script breaks it] → a malformed command aborts the transaction and fails the
-  seeder, so the store keeps its previous seeding and the adapter does not start; the seed-script
+- [A hand edit to the script breaks it] → the dry run on scratch DB 15 fails and so does the
+  seeder, before the live store is touched, so it keeps its previous seeding and the adapter does
+  not start; the seed-script
   tests catch a missing key, wrong unit or scientific notation before merge.
 - [Initial prices are frozen at today's sample] → intended: a refreshed sample no longer shifts
   `p_0` silently; changing it is an edit to the script.

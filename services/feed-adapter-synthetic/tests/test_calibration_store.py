@@ -213,7 +213,29 @@ def test_non_numeric_instrument_field() -> None:
 def test_non_positive_pip_size() -> None:
     keyspace = _keyspace()
     keyspace["instrument:EUR/USD"]["pip_size"] = "0"
-    _assert_rejected(keyspace, "'EUR/USD'", "'pip_size' must be positive")
+    _assert_rejected(keyspace, "'EUR/USD'", "'pip_size' must be a positive power of ten")
+
+
+@pytest.mark.parametrize("pip_size", ["0.25", "0.0005", "3"])
+def test_pip_size_that_is_not_a_power_of_ten(pip_size: str) -> None:
+    # The generator rounds by quantizing to pip_size's exponent - exact only for a power of ten.
+    keyspace = _keyspace()
+    keyspace["instrument:EUR/USD"]["pip_size"] = pip_size
+    _assert_rejected(keyspace, "'EUR/USD'", "'pip_size' must be a positive power of ten")
+
+
+@pytest.mark.parametrize("pip_size", ["1", "10", "0.01", "0.00001", "1E-5"])
+def test_pip_size_that_is_a_power_of_ten(pip_size: str) -> None:
+    keyspace = _keyspace()
+    keyspace["instrument:EUR/USD"]["pip_size"] = pip_size
+    assert _load(keyspace)["EURUSD"].price_increment == Decimal(pip_size)
+
+
+@pytest.mark.parametrize("initial_price", ["0", "-5"])
+def test_non_positive_initial_price(initial_price: str) -> None:
+    keyspace = _keyspace()
+    keyspace["instrument:EUR/USD"]["initial_price"] = initial_price
+    _assert_rejected(keyspace, "'EUR/USD'", "'initial_price' must be positive")
 
 
 def test_missing_quantity() -> None:
@@ -240,16 +262,63 @@ def test_missing_param_count() -> None:
     _assert_rejected(keyspace, "'EUR/USD'", "calib:EUR/USD:return:param_count")
 
 
-def test_param_count_higher_than_hashes_present() -> None:
+@pytest.mark.parametrize("count", ["1", "3"])
+def test_param_count_that_disagrees_with_the_family(count: str) -> None:
+    # Laplace takes (loc, scale): any other count would fail at the first draw, not at load.
     keyspace = _keyspace()
-    keyspace["calib:EUR/USD:return:param_count"] = "3"
-    _assert_rejected(keyspace, "'EUR/USD'", "param_count` is 3", "calib:EUR/USD:return:param:2")
+    keyspace["calib:EUR/USD:return:param_count"] = count
+    _assert_rejected(
+        keyspace, "'EUR/USD'", f"param_count` is {count}", "'laplace' takes 2 parameters"
+    )
 
 
-def test_param_count_lower_than_hashes_present() -> None:
+def test_non_integer_param_count() -> None:
     keyspace = _keyspace()
-    keyspace["calib:EUR/USD:spread:param_count"] = "2"
-    _assert_rejected(keyspace, "'EUR/USD'", "param_count` is 2", "calib:EUR/USD:spread:param:2")
+    keyspace["calib:EUR/USD:return:param_count"] = "two"
+    _assert_rejected(keyspace, "'EUR/USD'", "calib:EUR/USD:return:param_count", "'two'")
+
+
+def test_parameter_hash_missing_below_param_count() -> None:
+    keyspace = _keyspace()
+    del keyspace["calib:EUR/USD:return:param:1"]
+    _assert_rejected(keyspace, "'EUR/USD'", "param_count` is 2", "calib:EUR/USD:return:param:1")
+
+
+def test_parameter_hash_beyond_param_count() -> None:
+    keyspace = _keyspace()
+    keyspace["calib:EUR/USD:return:param:2"] = _param("df", "3", "dimensionless")
+    _assert_rejected(keyspace, "'EUR/USD'", "param_count` is 2", "calib:EUR/USD:return:param:2")
+
+
+def test_parameters_out_of_the_family_order() -> None:
+    # Swapped loc/scale would otherwise load as a Laplace with loc=scale and scale=0.
+    keyspace = _keyspace()
+    loc, scale = "calib:EUR/USD:return:param:0", "calib:EUR/USD:return:param:1"
+    keyspace[loc], keyspace[scale] = keyspace[scale], keyspace[loc]
+    _assert_rejected(keyspace, "'EUR/USD'", loc, "named 'scale'", "'loc' at position 0")
+
+
+@pytest.mark.parametrize(
+    ("key", "name", "value"),
+    [
+        ("calib:EUR/USD:return:param:1", "scale", "0"),
+        ("calib:EUR/USD:spread:param:2", "scale", "-4.92226"),
+        ("calib:EUR/USD:spread:param:0", "a", "0"),
+        ("calib:EUR/USD:interval:param:0", "s", "-1.5"),
+    ],
+)
+def test_non_positive_scale_or_shape_parameter(key: str, name: str, value: str) -> None:
+    keyspace = _keyspace()
+    keyspace[key]["value"] = value
+    _assert_rejected(keyspace, "'EUR/USD'", key, f"({name!r}) must be positive")
+
+
+def test_negative_loc_is_accepted() -> None:
+    # `loc` is unbounded: the interval fixture's own loc is already negative, and a negative
+    # return loc is an ordinary downward drift.
+    keyspace = _keyspace()
+    keyspace["calib:EUR/USD:return:param:0"]["value"] = "-0.000001"
+    assert _load(keyspace)["EURUSD"].return_distribution.params[0] == -0.000001
 
 
 @pytest.mark.parametrize("field", ["name", "value", "unit"])
@@ -270,6 +339,17 @@ def test_one_bad_symbol_rejects_the_whole_load() -> None:
     keyspace = _keyspace(3)
     del keyspace["calib:X2/USD:spread:family"]
     _assert_rejected(keyspace, "'X2/USD'")
+
+
+def test_value_that_is_not_utf8() -> None:
+    class _NonUtf8Family(_FakeRedis):
+        def reply(self, op: str, name: str) -> Any:
+            if name == "calib:EUR/USD:return:family":
+                return b"\xfflaplace"
+            return super().reply(op, name)
+
+    with pytest.raises(CalibrationError, match="calib:EUR/USD:return:family.*not UTF-8"):
+        asyncio.run(CalibrationStore(_NonUtf8Family(_keyspace())).load())
 
 
 # --- the committed seed script ----------------------------------------------------------------
@@ -314,8 +394,9 @@ def test_seed_script_is_one_transaction_that_first_deletes_the_previous_seeding(
 
 
 def test_seed_script_loads_every_symbol() -> None:
-    # `load` validates the whole keyspace - families, parameter counts, units, instrument fields -
-    # so loading cleanly is the completeness check.
+    # `load` validates the whole keyspace - families, each family's parameter count, names and
+    # positive scales/shapes, units, instrument fields - so loading cleanly is the completeness
+    # check.
     calibrations = _load(_keyspace_from_seed_script())
 
     assert len(calibrations) == 17

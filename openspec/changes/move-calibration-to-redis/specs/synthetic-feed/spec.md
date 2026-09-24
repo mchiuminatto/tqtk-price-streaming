@@ -85,7 +85,12 @@ The adapter SHALL refuse to start generating when the calibration store's discov
 or when any symbol in it lacks a `symbology` entry, an `instrument:<venue>` field, or a complete
 distribution for any of the `return`, `spread` and `interval` quantities — a missing `family`, a
 `param_count` that disagrees with the parameter hashes present, a parameter missing `name`,
-`value` or `unit`, an unrecognized `unit`, or a family the adapter cannot sample. It SHALL NOT fall
+`value` or `unit`, an unrecognized `unit`, or a family the adapter cannot sample — or when any of
+it could not be generated from: a `param_count` other than the family's own parameter count, a
+parameter whose `name` is not the one the family takes at that position, a scale or shape
+parameter that is not positive, a `pip_size` that is not a positive power of ten, or an
+`initial_price` that is not positive. Every such check SHALL happen before generation starts, so a
+calibration that loads is one the adapter can sample. It SHALL NOT fall
 back to any other source of calibration, and SHALL NOT start generating for a subset of the
 discovery set. The failure SHALL name the symbol and the missing or invalid key.
 
@@ -98,6 +103,12 @@ distinguishable from a connection problem.
   `spread` quantity
 - **THEN** the adapter publishes no ticks for any symbol and exits with an error naming that
   symbol and the missing key
+
+#### Scenario: A symbol's calibration cannot be sampled
+- **WHEN** the adapter starts and one symbol's `return` distribution is `laplace` with a `scale`
+  parameter of `0`, or with a `param_count` of `3`
+- **THEN** the adapter publishes no ticks for any symbol, `/ready` never reports the calibration
+  dependency connected, and it exits with an error naming that symbol and the offending key
 
 #### Scenario: The store has not been seeded
 - **WHEN** the adapter starts against a Redis instance whose `calib:symbols` set is empty or absent

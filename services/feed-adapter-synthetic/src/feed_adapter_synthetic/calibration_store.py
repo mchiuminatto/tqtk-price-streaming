@@ -19,19 +19,22 @@ floating-point error is introduced before the final conversion to `float`.
 
 `load` validates the whole keyspace before returning and raises `CalibrationError` naming the
 symbol and key on the first problem - no fallback, no partial result, per this package's "raise
-rather than guess" convention. It costs three pipelined round trips however many symbols there are.
+rather than guess" convention. That includes checking every distribution against what its family's
+sampler will do with it (`distributions.FAMILY_PARAMETERS`: the parameter count, each parameter's
+name at its position, and a positive value for every scale and shape parameter), so a calibration
+that loads is one the generator can draw from. It costs three pipelined round trips however many
+symbols there are.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from decimal import Decimal, InvalidOperation
-from typing import Final
-
-from redis.asyncio import Redis
+from types import TracebackType
+from typing import Any, Final, Protocol, Self
 
 from .calibration import SymbolCalibration
-from .distributions import SUPPORTED_FAMILIES, Distribution
+from .distributions import FAMILY_PARAMETERS, UNBOUNDED_PARAMETERS, Distribution
 
 __all__ = ["QUANTITIES", "CalibrationError", "CalibrationStore"]
 
@@ -56,12 +59,39 @@ class CalibrationError(ValueError):
     """The calibration store is missing, incomplete or malformed - the adapter must not start."""
 
 
-def _text(value: bytes | str) -> str:
-    return value.decode() if isinstance(value, bytes) else value
+class _Pipeline(Protocol):
+    """The slice of a `redis.asyncio` pipeline `CalibrationStore` uses."""
+
+    def smembers(self, name: str) -> Any: ...
+    def hgetall(self, name: str) -> Any: ...
+    def get(self, name: str) -> Any: ...
+    async def execute(self) -> list[Any]: ...
+    async def __aenter__(self) -> Self: ...
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> Any: ...
 
 
-def _decode_hash(raw: Mapping[bytes | str, bytes | str]) -> dict[str, str]:
-    return {_text(k): _text(v) for k, v in raw.items()}
+class _RedisClient(Protocol):
+    """The slice of `redis.asyncio.Redis` `CalibrationStore` uses - so a test fake qualifies too."""
+
+    def pipeline(self, transaction: bool = ...) -> _Pipeline: ...
+
+
+def _text(value: bytes | str, *, key: str) -> str:
+    if isinstance(value, str):
+        return value
+    try:
+        return value.decode()
+    except UnicodeDecodeError:
+        raise CalibrationError(f"`{key}` holds a value that is not UTF-8: {value!r}") from None
+
+
+def _decode_hash(raw: Mapping[bytes | str, bytes | str], *, key: str) -> dict[str, str]:
+    return {_text(k, key=key): _text(v, key=key) for k, v in raw.items()}
 
 
 def _decimal(text: str, *, key: str, field: str) -> Decimal:
@@ -74,6 +104,11 @@ def _decimal(text: str, *, key: str, field: str) -> Decimal:
     return value
 
 
+def _is_power_of_ten(value: Decimal) -> bool:
+    # `normalize` strips trailing zeros, so a power of ten is left with the single digit 1.
+    return value > 0 and value.normalize().as_tuple().digits == (1,)
+
+
 def _to_code_units(value: Decimal, unit: str, pip_size: Decimal) -> float:
     if unit == "pip":
         value = value * pip_size
@@ -82,12 +117,69 @@ def _to_code_units(value: Decimal, unit: str, pip_size: Decimal) -> float:
     return float(value)
 
 
+def _parse_instrument(
+    venue: str, raw: Mapping[bytes | str, bytes | str]
+) -> tuple[Decimal, Decimal]:
+    """`instrument:<venue>`'s `pip_size` and `initial_price`, validated."""
+    key = f"instrument:{venue}"
+    instrument = _decode_hash(raw, key=key)
+    for field in _INSTRUMENT_FIELDS:
+        if not instrument.get(field):
+            raise CalibrationError(f"{venue!r}: `{key}` has no {field!r} field")
+    pip_size = _decimal(instrument["pip_size"], key=key, field="pip_size")
+    # `generator._RandomWalk` rounds prices by quantizing to `pip_size`'s exponent, which is an
+    # exact rounding to multiples of it only when it is a power of ten.
+    if not _is_power_of_ten(pip_size):
+        raise CalibrationError(
+            f"{venue!r}: `{key}` field 'pip_size' must be a positive power of ten, "
+            f"not {instrument['pip_size']!r}"
+        )
+    initial_price = _decimal(instrument["initial_price"], key=key, field="initial_price")
+    if initial_price <= 0:
+        raise CalibrationError(
+            f"{venue!r}: `{key}` field 'initial_price' must be positive, "
+            f"not {instrument['initial_price']!r}"
+        )
+    return pip_size, initial_price
+
+
+def _parse_head(
+    venue: str, quantity: str, raw_family: bytes | str | None, raw_count: bytes | str | None
+) -> tuple[str, int]:
+    """One quantity's `family` and `param_count`, validated against the family's parameters."""
+    prefix = f"calib:{venue}:{quantity}"
+    if raw_family is None:
+        raise CalibrationError(f"{venue!r}: `{prefix}:family` is missing")
+    family = _text(raw_family, key=f"{prefix}:family")
+    if family not in FAMILY_PARAMETERS:
+        raise CalibrationError(
+            f"{venue!r}: `{prefix}:family` names {family!r}, which the adapter "
+            f"cannot sample (supported: {sorted(FAMILY_PARAMETERS)})"
+        )
+    if raw_count is None:
+        raise CalibrationError(f"{venue!r}: `{prefix}:param_count` is missing")
+    text = _text(raw_count, key=f"{prefix}:param_count")
+    try:
+        count = int(text)
+    except ValueError:
+        raise CalibrationError(
+            f"{venue!r}: `{prefix}:param_count` is not an integer: {text!r}"
+        ) from None
+    expected = FAMILY_PARAMETERS[family]
+    if count != len(expected):
+        raise CalibrationError(
+            f"{venue!r}: `{prefix}:param_count` is {count}, but {family!r} takes "
+            f"{len(expected)} parameters {expected}"
+        )
+    return family, count
+
+
 class CalibrationStore:
     """Loads `SymbolCalibration`s from the calibration keyspace - see module docstring."""
 
     __slots__ = ("_redis",)
 
-    def __init__(self, redis: Redis) -> None:
+    def __init__(self, redis: _RedisClient) -> None:
         self._redis = redis
 
     async def load(self) -> dict[str, SymbolCalibration]:
@@ -129,18 +221,18 @@ class CalibrationStore:
             pipe.hgetall(SYMBOLOGY_KEY)
             raw_symbols, raw_quantities, raw_symbology = await pipe.execute()
 
-        venues = sorted(_text(v) for v in raw_symbols)
+        venues = sorted(_text(v, key=SYMBOLS_KEY) for v in raw_symbols)
         if not venues:
             raise CalibrationError(
                 f"calibration store is not seeded: `{SYMBOLS_KEY}` is empty or absent - "
                 f"{_SEEDER_HINT}"
             )
-        quantities = {_text(q) for q in raw_quantities}
+        quantities = {_text(q, key=QUANTITIES_KEY) for q in raw_quantities}
         missing = [q for q in QUANTITIES if q not in quantities]
         if missing:
             raise CalibrationError(f"`{QUANTITIES_KEY}` lacks {missing} - {_SEEDER_HINT}")
 
-        symbology = _decode_hash(raw_symbology)
+        symbology = _decode_hash(raw_symbology, key=SYMBOLOGY_KEY)
         seen: dict[str, str] = {}
         for venue in venues:
             file_symbol = symbology.get(venue)
@@ -169,47 +261,18 @@ class CalibrationStore:
         instruments: dict[str, tuple[Decimal, Decimal]] = {}
         heads: dict[tuple[str, str], tuple[str, int]] = {}
         for venue in venues:
-            key = f"instrument:{venue}"
-            instrument = _decode_hash(next(replies))
-            for field in _INSTRUMENT_FIELDS:
-                if not instrument.get(field):
-                    raise CalibrationError(f"{venue!r}: `{key}` has no {field!r} field")
-            pip_size = _decimal(instrument["pip_size"], key=key, field="pip_size")
-            if pip_size <= 0:
-                raise CalibrationError(f"{venue!r}: `{key}` field 'pip_size' must be positive")
-            initial_price = _decimal(instrument["initial_price"], key=key, field="initial_price")
-            instruments[venue] = (pip_size, initial_price)
-
+            instruments[venue] = _parse_instrument(venue, next(replies))
             for quantity in QUANTITIES:
-                prefix = f"calib:{venue}:{quantity}"
                 raw_family, raw_count = next(replies), next(replies)
-                if raw_family is None:
-                    raise CalibrationError(f"{venue!r}: `{prefix}:family` is missing")
-                family = _text(raw_family)
-                if family not in SUPPORTED_FAMILIES:
-                    raise CalibrationError(
-                        f"{venue!r}: `{prefix}:family` names {family!r}, which the adapter "
-                        f"cannot sample (supported: {sorted(SUPPORTED_FAMILIES)})"
-                    )
-                if raw_count is None:
-                    raise CalibrationError(f"{venue!r}: `{prefix}:param_count` is missing")
-                try:
-                    count = int(_text(raw_count))
-                except ValueError:
-                    count = -1
-                if count < 0:
-                    raise CalibrationError(
-                        f"{venue!r}: `{prefix}:param_count` is not a non-negative integer: "
-                        f"{_text(raw_count)!r}"
-                    )
-                heads[venue, quantity] = (family, count)
+                heads[venue, quantity] = _parse_head(venue, quantity, raw_family, raw_count)
         return instruments, heads
 
     async def _read_params(
         self, venues: list[str], heads: Mapping[tuple[str, str], tuple[str, int]]
     ) -> dict[tuple[str, str], list[tuple[Decimal, str]]]:
         """Round trip 3: every parameter hash, plus the one past `param_count`, which must be
-        absent - so a count lower than the hashes present is caught as well as a higher one."""
+        absent - so a hash left over beyond the family's parameters is caught as well as a missing
+        one."""
         async with self._redis.pipeline(transaction=False) as pipe:
             for venue in venues:
                 for quantity in QUANTITIES:
@@ -221,12 +284,12 @@ class CalibrationStore:
         params: dict[tuple[str, str], list[tuple[Decimal, str]]] = {}
         for venue in venues:
             for quantity in QUANTITIES:
-                _, count = heads[venue, quantity]
+                family, count = heads[venue, quantity]
                 prefix = f"calib:{venue}:{quantity}"
                 values: list[tuple[Decimal, str]] = []
-                for n in range(count):
+                for n, expected_name in enumerate(FAMILY_PARAMETERS[family]):
                     key = f"{prefix}:param:{n}"
-                    param = _decode_hash(next(replies))
+                    param = _decode_hash(next(replies), key=key)
                     if not param:
                         raise CalibrationError(
                             f"{venue!r}: `{prefix}:param_count` is {count} but `{key}` is missing"
@@ -234,14 +297,25 @@ class CalibrationStore:
                     for field in _PARAM_FIELDS:
                         if not param.get(field):
                             raise CalibrationError(f"{venue!r}: `{key}` has no {field!r} field")
+                    if param["name"] != expected_name:
+                        raise CalibrationError(
+                            f"{venue!r}: `{key}` is named {param['name']!r}, but {family!r} "
+                            f"takes {expected_name!r} at position {n}"
+                        )
                     unit = param["unit"]
                     if unit not in _UNITS:
                         raise CalibrationError(
                             f"{venue!r}: `{key}` has unknown unit {unit!r} "
                             f"(expected one of {sorted(_UNITS)})"
                         )
-                    values.append((_decimal(param["value"], key=key, field="value"), unit))
-                if _decode_hash(next(replies)):
+                    value = _decimal(param["value"], key=key, field="value")
+                    if expected_name not in UNBOUNDED_PARAMETERS and value <= 0:
+                        raise CalibrationError(
+                            f"{venue!r}: `{key}` ({expected_name!r}) must be positive, "
+                            f"not {param['value']!r}"
+                        )
+                    values.append((value, unit))
+                if _decode_hash(next(replies), key=f"{prefix}:param:{count}"):
                     raise CalibrationError(
                         f"{venue!r}: `{prefix}:param_count` is {count} but "
                         f"`{prefix}:param:{count}` exists"

@@ -10,19 +10,23 @@ spreads, seconds for intervals).
 
 `sample()` implements every family with `random.Random` alone, via standard transforms, so the
 feed itself never needs `scipy`/`numpy` at runtime - only the offline fitting step (outside this
-package) does. `SUPPORTED_FAMILIES` is what a calibration source may name.
+package) does. `SUPPORTED_FAMILIES` is what a calibration source may name, and
+`FAMILY_PARAMETERS` the parameters - by name, in order - it must supply for each.
 """
 
 from __future__ import annotations
 
 import math
 import random
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Final
 
 __all__ = [
+    "FAMILY_PARAMETERS",
     "SUPPORTED_FAMILIES",
+    "UNBOUNDED_PARAMETERS",
     "Distribution",
 ]
 
@@ -114,3 +118,23 @@ _SAMPLERS: dict[str, Callable[[random.Random, tuple[float, ...]], float]] = {
 
 # The family names `Distribution.sample` can draw from - what a calibration source must name.
 SUPPORTED_FAMILIES: Final = frozenset(_SAMPLERS)
+
+# Each family's parameter names in `scipy.stats.<family>.fit` order - the order its sampler above
+# unpacks `params` in, so a calibration source supplying a different count or order is refused at
+# load rather than failing (or silently mis-sampling) at the first draw.
+FAMILY_PARAMETERS: Final[Mapping[str, tuple[str, ...]]] = MappingProxyType(
+    {
+        "constant": ("value",),
+        "normal": ("loc", "scale"),
+        "laplace": ("loc", "scale"),
+        "student_t": ("df", "loc", "scale"),
+        "gamma": ("a", "loc", "scale"),
+        "lognormal": ("s", "loc", "scale"),
+        "weibull_min": ("c", "loc", "scale"),
+        "loglogistic": ("c", "loc", "scale"),
+    }
+)
+
+# The parameters that may take any finite value. Every other one is a scale or a shape parameter,
+# which every family above requires to be strictly positive.
+UNBOUNDED_PARAMETERS: Final = frozenset({"value", "loc"})

@@ -12,7 +12,12 @@ import random
 import statistics
 
 import pytest
-from feed_adapter_synthetic.distributions import Distribution
+from feed_adapter_synthetic.distributions import (
+    FAMILY_PARAMETERS,
+    SUPPORTED_FAMILIES,
+    UNBOUNDED_PARAMETERS,
+    Distribution,
+)
 
 _N = 200_000
 _SEED = 12345
@@ -110,3 +115,26 @@ def test_unknown_family_raises():
 
     with pytest.raises(ValueError, match="no sampler registered"):
         dist.sample(random.Random(0))
+
+
+# --- the parameter list each family declares --------------------------------------------------
+
+
+def test_every_family_declares_its_parameters():
+    assert set(FAMILY_PARAMETERS) == SUPPORTED_FAMILIES
+
+
+@pytest.mark.parametrize("family", sorted(FAMILY_PARAMETERS))
+def test_each_sampler_takes_exactly_its_declared_parameters(family):
+    # Catches a declared list drifting from what the sampler unpacks: the load validates against
+    # the list, so the two must agree for "loads" to mean "can be sampled".
+    names = FAMILY_PARAMETERS[family]
+    Distribution(family, tuple(1.0 for _ in names)).sample(random.Random(0))
+    with pytest.raises(ValueError):
+        Distribution(family, tuple(1.0 for _ in (*names, "extra"))).sample(random.Random(0))
+
+
+def test_every_unbounded_parameter_is_one_some_family_declares():
+    # A typo here would silently leave that parameter subject to the positivity check.
+    declared = {name for names in FAMILY_PARAMETERS.values() for name in names}
+    assert UNBOUNDED_PARAMETERS <= declared

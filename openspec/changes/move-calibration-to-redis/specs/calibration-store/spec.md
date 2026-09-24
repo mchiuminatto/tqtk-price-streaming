@@ -22,7 +22,8 @@ The store SHALL hold calibration under exactly these keys, keyed by venue symbol
 
 Numeric values (`pip_size`, `initial_price`, each parameter's `value`) SHALL be stored as decimal
 strings. `pip_size` is the instrument's minimum price increment — the smallest price change it is
-quoted in (e.g. `0.00001` for `EURUSD`, `0.001` for `USDJPY`).
+quoted in (e.g. `0.00001` for `EURUSD`, `0.001` for `USDJPY`), and SHALL be a power of ten.
+`initial_price` SHALL be positive.
 
 #### Scenario: A consumer discovers the calibrated instruments
 - **WHEN** a consumer reads `calib:symbols` and `symbology`
@@ -91,6 +92,12 @@ fail, so the adapter does not start on it.
 
 #### Scenario: The script contains a malformed command
 - **WHEN** a seed script containing a malformed command is applied
+- **THEN** no calibration key changes, the seeder exits with a failure, and the adapter is not
+  started against the result
+
+#### Scenario: The script contains a command that fails only when executed
+- **WHEN** a seed script whose commands all queue but one fails inside `EXEC` (e.g. an `HSET` with
+  an odd number of field/value arguments) is applied to a seeded store
 - **THEN** no calibration key changes, the seeder exits with a failure, and the adapter is not
   started against the result
 

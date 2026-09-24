@@ -9,8 +9,11 @@
 #
 # The whole file is one MULTI/EXEC transaction. Its first queued command deletes every existing
 # calibration key, so a reader sees either the previous seeding or this one - never a mix - and an
-# instrument removed from this file disappears from the store. A malformed command aborts the whole
-# transaction (EXECABORT), leaving the store as it was.
+# instrument removed from this file disappears from the store. MULTI/EXEC alone does not make a
+# broken script harmless: a command rejected while queueing aborts the whole transaction
+# (EXECABORT), but one that fails while EXEC runs (e.g. an HSET with an odd field/value count) does
+# not roll back the rest, delete included. So the seeder dry-runs the script against scratch DB 15
+# first and applies it to the live DB 0 only if that run had no error.
 #
 # Key layout (owned by the `calibration-store` capability; read by the adapter's CalibrationStore):
 #   symbology                              hash: venue symbol -> file symbol

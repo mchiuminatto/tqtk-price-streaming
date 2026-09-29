@@ -1,9 +1,9 @@
 ## 1. Dependencies and configuration (`synthetic-feed` spec)
 
-- [ ] 1.1 Add `psycopg[binary]>=3.2` to `services/feed-adapter-synthetic/pyproject.toml` and refresh
+- [x] 1.1 Add `psycopg[binary]>=3.2` to `services/feed-adapter-synthetic/pyproject.toml` and refresh
       `uv.lock`. Verify that `uv sync` succeeds and that `python -c "import psycopg"` works in the
       service's environment.
-- [ ] 1.2 Add `postgres_url` (default `postgresql://tqtk@localhost:5432/tqtk`) and
+- [x] 1.2 Add `postgres_url` (default `postgresql://tqtk@localhost:5432/tqtk`) and
       `postgres_password_file: Path | None` to `FeedConfig`. Update the module docstring and the
       `redis_url` comment, since Redis is now the bus only. Verify in `tests/test_feed_config.py`
       that both fields read from `TQTK_POSTGRES_URL` / `TQTK_POSTGRES_PASSWORD_FILE` and keep their

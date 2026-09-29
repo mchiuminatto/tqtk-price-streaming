@@ -5,6 +5,7 @@ description = "Statistically-calibrated synthetic tick generator publishing raw 
 requires-python = ">=3.12"
 dependencies = [
     "tqtk-common",
+    "psycopg[binary]>=3.2",
     "redis>=5.0",
 ]
 

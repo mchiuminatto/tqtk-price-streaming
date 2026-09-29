@@ -68,12 +68,14 @@ name = "feed-adapter-synthetic"
 version = "0.1.0"
 source = { editable = "services/feed-adapter-synthetic" }
 dependencies = [
+    { name = "psycopg", extra = ["binary"] },
     { name = "redis" },
     { name = "tqtk-common" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
     { name = "redis", specifier = ">=5.0" },
     { name = "tqtk-common", editable = "libs/tqtk-common" },
 ]
